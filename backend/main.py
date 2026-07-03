@@ -253,13 +253,19 @@ def recent_problems(
         openai_service = get_openai_service()
         if include_ai and openai_service.configured():
             try:
-                ai_summary = openai_service.summarize_recent_problems(store.recent_sample_for_prompt(days=days))
+                ai_summary = openai_service.summarize_recent_problems(store.recent_sample_for_prompt(days=days), groups)
             except Exception as exc:
                 ai_error = str(exc)
+        priority_counts = {"Alta": 0, "Media": 0, "Bassa": 0}
+        for group in groups:
+            priority = str(group.get("priority", "Bassa"))
+            priority_counts[priority] = priority_counts.get(priority, 0) + 1
         return RecentProblemsResponse(
             since=since,
             total_recent_tickets=len(recent),
             groups=groups,
+            priority_counts=priority_counts,
+            recurring_count=sum(1 for group in groups if group.get("recurring")),
             ai_summary=ai_summary,
             ai_error=ai_error,
         )

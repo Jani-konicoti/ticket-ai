@@ -30,16 +30,26 @@ class ProblemGroup(BaseModel):
     key: str
     title: str
     count: int
+    unique_ticket_count: int
+    priority: str
+    priority_score: float
+    category: str
+    trend: str
+    recurring: bool
     first_seen: str | None = None
     last_seen: str | None = None
     sample_ticket_ids: list[int | str]
     sample_titles: list[str]
+    keywords: list[str] = []
+    latest_tickets: list[dict] = []
 
 
 class RecentProblemsResponse(BaseModel):
     since: str | None
     total_recent_tickets: int
     groups: list[ProblemGroup]
+    priority_counts: dict[str, int] = {}
+    recurring_count: int = 0
     ai_summary: str | None = None
     ai_error: str | None = None
 

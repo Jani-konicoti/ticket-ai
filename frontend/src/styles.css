@@ -494,6 +494,18 @@ textarea:focus {
   background: #2d6f6d;
 }
 
+.priority-pill.priority-alta {
+  background: #b23b3b;
+}
+
+.priority-pill.priority-media {
+  background: #946018;
+}
+
+.priority-pill.priority-bassa {
+  background: #2d6f6d;
+}
+
 .model-line {
   margin-top: 14px;
   color: #6b7485;
@@ -563,6 +575,309 @@ textarea:focus {
 
 .analysis-toolbar {
   min-height: 76px;
+}
+
+.known-problems-panel {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.compact-select {
+  padding: 6px 8px;
+  background: #f7fafc;
+  border: 1px solid #dce4ee;
+  border-radius: 10px;
+}
+
+.priority-lanes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.priority-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52px;
+  padding: 10px 12px;
+  color: #344154;
+  background: #f8fafc;
+  border: 1px solid #dfe7ef;
+  border-radius: 12px;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.priority-filter:hover,
+.priority-filter.active {
+  transform: translateY(-1px);
+  border-color: #b8c8d9;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.07);
+}
+
+.priority-filter span {
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+
+.priority-filter strong {
+  color: #172033;
+  font-size: 1.2rem;
+  font-weight: 900;
+}
+
+.priority-filter.priority-alta.active,
+.priority-filter.priority-alta:hover {
+  background: #fff4f4;
+  border-color: #e8b2b2;
+}
+
+.priority-filter.priority-media.active,
+.priority-filter.priority-media:hover {
+  background: #fff8e8;
+  border-color: #ead19d;
+}
+
+.priority-filter.priority-bassa.active,
+.priority-filter.priority-bassa:hover,
+.recurring-filter.active,
+.recurring-filter:hover {
+  background: #edf8f7;
+  border-color: #b9d8d5;
+}
+
+.known-problem-list {
+  display: grid;
+  gap: 10px;
+}
+
+.known-problem-card {
+  overflow: hidden;
+  border: 1px solid #dfe7ef;
+  border-left-width: 5px;
+  border-radius: 12px;
+  background: #ffffff;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.known-problem-card:hover,
+.known-problem-card.expanded {
+  transform: translateY(-1px);
+  border-color: #b8c8d9;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+}
+
+.known-problem-card.priority-alta {
+  border-left-color: #b23b3b;
+}
+
+.known-problem-card.priority-media {
+  border-left-color: #946018;
+}
+
+.known-problem-card.priority-bassa {
+  border-left-color: #2d6f6d;
+}
+
+.known-problem-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 13px;
+  width: 100%;
+  padding: 14px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.problem-rank {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: #ffffff;
+  background: #2f6174;
+  border-radius: 10px;
+  font-weight: 900;
+}
+
+.problem-summary {
+  min-width: 0;
+}
+
+.problem-title-row,
+.problem-meta,
+.keyword-row,
+.problem-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.problem-title-row {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.problem-title-row h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #172033;
+  font-size: 1rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.problem-meta {
+  flex-wrap: wrap;
+  margin-top: 7px;
+  color: #627084;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.problem-meta span {
+  padding-right: 8px;
+  border-right: 1px solid #d9e2ec;
+}
+
+.problem-meta span:last-child {
+  border-right: 0;
+}
+
+.keyword-row {
+  flex-wrap: wrap;
+  margin-top: 9px;
+}
+
+.keyword-row span {
+  padding: 4px 8px;
+  color: #36536b;
+  background: #eef3f7;
+  border: 1px solid #dce4ee;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.problem-side {
+  align-self: center;
+  flex-direction: column;
+  min-width: 58px;
+  color: #64748b;
+}
+
+.problem-side strong {
+  color: #172033;
+  font-size: 1.15rem;
+  font-weight: 900;
+}
+
+.problem-side span {
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.rotate {
+  transform: rotate(180deg);
+}
+
+.problem-details {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+
+.known-problem-card.expanded .problem-details {
+  grid-template-rows: 1fr;
+}
+
+.problem-details > * {
+  overflow: hidden;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 14px 12px 61px;
+}
+
+.detail-grid > div {
+  min-width: 0;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+}
+
+.detail-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #667387;
+  font-size: 0.74rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.detail-grid strong {
+  display: block;
+  overflow: hidden;
+  color: #1f2a3d;
+  font-size: 0.88rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ticket-snippet-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 14px 14px 61px;
+}
+
+.ticket-snippet {
+  padding: 11px;
+  background: #fbfdff;
+  border: 1px solid #e1e7ef;
+  border-radius: 10px;
+}
+
+.ticket-snippet > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #6b7485;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.ticket-snippet strong {
+  color: #2f6174;
+}
+
+.ticket-snippet h4 {
+  margin: 7px 0 5px;
+  color: #1c2636;
+  font-size: 0.92rem;
+  letter-spacing: 0;
+}
+
+.ticket-snippet p {
+  margin: 0;
+  color: #465367;
+  line-height: 1.45;
 }
 
 .config-grid {
@@ -864,6 +1179,11 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .priority-lanes,
+  .detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .search-results {
     grid-template-columns: 1fr;
   }
@@ -903,8 +1223,24 @@ select {
   .form-grid,
   .progress-stats,
   .stepper,
-  .hit-grid {
+  .hit-grid,
+  .priority-lanes,
+  .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .known-problem-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .problem-rank,
+  .problem-side {
+    display: none;
+  }
+
+  .detail-grid,
+  .ticket-snippet-list {
+    padding-left: 14px;
   }
 
   .operation-row {

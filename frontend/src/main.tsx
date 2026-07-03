@@ -6,10 +6,12 @@ import {
   BarChart3,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock3,
   Database,
+  Filter,
   Layers,
   Loader2,
   MessageSquareText,
@@ -61,16 +63,32 @@ type ProblemGroup = {
   key: string;
   title: string;
   count: number;
+  unique_ticket_count: number;
+  priority: "Alta" | "Media" | "Bassa";
+  priority_score: number;
+  category: string;
+  trend: string;
+  recurring: boolean;
   first_seen?: string | null;
   last_seen?: string | null;
   sample_ticket_ids: Array<number | string>;
   sample_titles: string[];
+  keywords: string[];
+  latest_tickets: Array<{
+    id: number | string;
+    created?: string | null;
+    title: string;
+    poster?: string | null;
+    excerpt: string;
+  }>;
 };
 
 type RecentProblemsResponse = {
   since?: string | null;
   total_recent_tickets: number;
   groups: ProblemGroup[];
+  priority_counts: Record<string, number>;
+  recurring_count: number;
   ai_summary?: string | null;
   ai_error?: string | null;
 };
@@ -203,6 +221,8 @@ function App() {
   const [analysis, setAnalysis] = useState<RecentProblemsResponse | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
+  const [priorityFilter, setPriorityFilter] = useState<"all" | "Alta" | "Media" | "Bassa" | "recurring">("all");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [config, setConfig] = useState<DatabaseConfig>(emptyConfig);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
@@ -264,6 +284,24 @@ function App() {
   }, [answer, hitPage]);
 
   const hitPages = answer ? Math.max(1, Math.ceil(answer.hits.length / HITS_PAGE_SIZE)) : 1;
+  const filteredProblemGroups = useMemo(() => {
+    if (!analysis) return [];
+    if (priorityFilter === "all") return analysis.groups;
+    if (priorityFilter === "recurring") return analysis.groups.filter((group) => group.recurring);
+    return analysis.groups.filter((group) => group.priority === priorityFilter);
+  }, [analysis, priorityFilter]);
+
+  function toggleProblemGroup(key: string) {
+    setExpandedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
 
   async function submitQuestion(event?: React.FormEvent) {
     event?.preventDefault();
@@ -622,11 +660,74 @@ function App() {
                 />
                 <Metric
                   icon={<ShieldAlert size={18} />}
-                  label="Picco principale"
-                  value={analysis.groups[0] ? `${analysis.groups[0].count} casi` : "-"}
+                  label="Priorita alta"
+                  value={(analysis.priority_counts?.Alta ?? 0).toLocaleString("it-IT")}
+                />
+                <Metric
+                  icon={<BarChart3 size={18} />}
+                  label="Ricorrenti"
+                  value={analysis.recurring_count.toLocaleString("it-IT")}
                 />
                 <Metric icon={<Clock3 size={18} />} label="Dal" value={analysis.since?.slice(0, 10) ?? "-"} />
-                <Metric icon={<BarChart3 size={18} />} label="Periodo" value={`${days} giorni`} />
+              </section>
+
+              <section className="known-problems-panel elevated-panel">
+                <div className="list-header">
+                  <div className="panel-title">
+                    <ShieldAlert size={19} />
+                    <div>
+                      <h2>Priorita e problemi ricorrenti</h2>
+                      <p>
+                        {filteredProblemGroups.length.toLocaleString("it-IT")} gruppi su {analysis.groups.length.toLocaleString("it-IT")}
+                      </p>
+                    </div>
+                  </div>
+                  <label className="select-control compact-select">
+                    <Filter size={18} />
+                    <span>Vista</span>
+                    <select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as typeof priorityFilter)}>
+                      <option value="all">Tutte</option>
+                      <option value="Alta">Alta priorita</option>
+                      <option value="Media">Media priorita</option>
+                      <option value="Bassa">Bassa priorita</option>
+                      <option value="recurring">Solo ricorrenti</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="priority-lanes">
+                  {(["Alta", "Media", "Bassa"] as const).map((priority) => (
+                    <button
+                      className={`priority-filter priority-${priority.toLowerCase()} ${priorityFilter === priority ? "active" : ""}`}
+                      key={priority}
+                      type="button"
+                      onClick={() => setPriorityFilter(priority)}
+                    >
+                      <span>{priority}</span>
+                      <strong>{analysis.priority_counts?.[priority] ?? 0}</strong>
+                    </button>
+                  ))}
+                  <button
+                    className={`priority-filter recurring-filter ${priorityFilter === "recurring" ? "active" : ""}`}
+                    type="button"
+                    onClick={() => setPriorityFilter("recurring")}
+                  >
+                    <span>Ricorrenti</span>
+                    <strong>{analysis.recurring_count}</strong>
+                  </button>
+                </div>
+
+                <div className="known-problem-list">
+                  {filteredProblemGroups.map((group, index) => (
+                    <ProblemGroupCard
+                      expanded={expandedGroups.has(group.key)}
+                      group={group}
+                      index={index}
+                      key={group.key}
+                      onToggle={() => toggleProblemGroup(group.key)}
+                    />
+                  ))}
+                </div>
               </section>
 
               <section className="answer-panel summary-panel elevated-panel">
@@ -803,6 +904,81 @@ function Field({
       <span>{label}</span>
       <input type={type} value={value} onChange={(event) => onChange(event.target.value)} />
     </label>
+  );
+}
+
+function ProblemGroupCard({
+  group,
+  index,
+  expanded,
+  onToggle
+}: {
+  group: ProblemGroup;
+  index: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const priorityClass = `priority-${group.priority.toLowerCase()}`;
+  const visibleTickets = expanded ? group.latest_tickets : group.latest_tickets.slice(0, 2);
+
+  return (
+    <article className={`known-problem-card ${priorityClass} ${expanded ? "expanded" : ""}`}>
+      <button className="known-problem-main" type="button" onClick={onToggle} aria-expanded={expanded}>
+        <div className="problem-rank">{index + 1}</div>
+        <div className="problem-summary">
+          <div className="problem-title-row">
+            <h3>{group.title}</h3>
+            <span className={`priority-pill ${priorityClass}`}>{group.priority}</span>
+          </div>
+          <div className="problem-meta">
+            <span>{group.category}</span>
+            <span>{group.count.toLocaleString("it-IT")} ticket</span>
+            <span>{group.trend}</span>
+            <span>{group.recurring ? "Ricorrente" : "Singolo"}</span>
+          </div>
+          <div className="keyword-row">
+            {group.keywords.slice(0, 5).map((keyword) => (
+              <span key={keyword}>{keyword}</span>
+            ))}
+          </div>
+        </div>
+        <div className="problem-side">
+          <strong>{Math.round(group.priority_score)}</strong>
+          <span>score</span>
+          <ChevronDown className={expanded ? "rotate" : ""} size={20} />
+        </div>
+      </button>
+
+      <div className="problem-details">
+        <div className="detail-grid">
+          <div>
+            <span className="detail-label">Prima segnalazione</span>
+            <strong>{group.first_seen || "-"}</strong>
+          </div>
+          <div>
+            <span className="detail-label">Ultima segnalazione</span>
+            <strong>{group.last_seen || "-"}</strong>
+          </div>
+          <div>
+            <span className="detail-label">Ticket citati</span>
+            <strong>{group.sample_ticket_ids.slice(0, 8).join(", ") || "-"}</strong>
+          </div>
+        </div>
+
+        <div className="ticket-snippet-list">
+          {visibleTickets.map((ticket) => (
+            <div className="ticket-snippet" key={`${group.key}-${ticket.id}`}>
+              <div>
+                <strong>#{ticket.id}</strong>
+                <span>{ticket.created || "data n/d"}</span>
+              </div>
+              <h4>{ticket.title}</h4>
+              <p>{ticket.excerpt}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </article>
   );
 }
 

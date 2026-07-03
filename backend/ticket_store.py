@@ -11,6 +11,72 @@ import pandas as pd
 
 
 TEXT_COLUMNS = ("title", "clean_body")
+STOPWORDS = {
+    "che",
+    "con",
+    "del",
+    "della",
+    "delle",
+    "dei",
+    "gli",
+    "per",
+    "nel",
+    "nella",
+    "sono",
+    "ticket",
+    "richiesta",
+    "problema",
+    "errore",
+    "cliente",
+    "clienti",
+    "utente",
+    "utenti",
+    "non",
+    "una",
+    "uno",
+    "come",
+    "alla",
+    "alle",
+    "dal",
+    "dai",
+    "tra",
+    "piu",
+}
+HIGH_IMPACT_TERMS = (
+    "blocc",
+    "impossibile",
+    "urgente",
+    "massivo",
+    "non funziona",
+    "errore",
+    "accesso",
+    "login",
+    "scaden",
+    "fattur",
+    "pagamento",
+    "produzione",
+    "ccnl",
+)
+GENERIC_GROUP_KEYS = {
+    "assistenza",
+    "richiesta",
+    "risposta",
+    "nota",
+    "info",
+    "subject",
+    "senza titolo",
+    "anomalia",
+    "errore",
+    "urgente",
+}
+IGNORE_TITLE_PATTERNS = (
+    "successful mail delivery report",
+    "delivery status notification",
+    "undelivered mail returned",
+    "read receipt",
+    "ticket trasferito da",
+    "ticket creato dall'inserimento",
+)
 
 
 def _clean_text(value: Any) -> str:
@@ -32,6 +98,69 @@ def _normalize_group_key(title: str) -> str:
     value = re.sub(r"[^a-z0-9àèéìòù]+", " ", value)
     words = [w for w in value.split() if len(w) > 2]
     return " ".join(words[:8]) or "senza titolo"
+
+
+def _keywords(text: str, limit: int = 6) -> list[str]:
+    words = re.findall(r"[a-zA-Z0-9Ã Ã¨Ã©Ã¬Ã²Ã¹]{4,}", text.lower())
+    counts: dict[str, int] = {}
+    for word in words:
+        normalized = word.strip()
+        if normalized in STOPWORDS or normalized.isdigit():
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (item[1], item[0]), reverse=True)
+    return [word for word, _ in ranked[:limit]]
+
+
+def _category_for(text: str) -> str:
+    lowered = text.lower()
+    categories = [
+        ("Accessi e autenticazione", ("accesso", "login", "password", "utenza", "utente", "whitenet")),
+        ("Contratti e scadenze", ("ccnl", "contratt", "scaden", "agenda", "assuntiv")),
+        ("Fatturazione e costi", ("fattur", "costi", "premio", "xml", "importi", "pagamento")),
+        ("Import e procedure massive", ("massivo", "import", "caricamento", "procedura", "svecchia")),
+        ("Comunicazioni e firme", ("sms", "otp", "firma", "mail", "pec")),
+    ]
+    for label, terms in categories:
+        if any(term in lowered for term in terms):
+            return label
+    return "Operativita ticket"
+
+
+def _priority_for(count: int, recent_count: int, high_impact_count: int) -> tuple[str, float]:
+    score = float(count * 2 + recent_count * 1.5 + high_impact_count * 3)
+    if count >= 10 or recent_count >= 5 or high_impact_count >= 3:
+        return "Alta", score
+    if count >= 3 or recent_count >= 2 or high_impact_count >= 1:
+        return "Media", score
+    return "Bassa", score
+
+
+def _trend_for(count: int, recent_count: int, last_seen: Any, latest_date: Any) -> str:
+    if count > 0 and recent_count >= max(2, int(count * 0.45)):
+        return "In aumento"
+    if latest_date is not None and not pd.isna(latest_date) and last_seen is not None and not pd.isna(last_seen):
+        if latest_date - last_seen <= pd.Timedelta(days=3):
+            return "Recente"
+    return "Stabile"
+
+
+def _is_ignored_title(title: str) -> bool:
+    lowered = title.lower()
+    return any(pattern in lowered for pattern in IGNORE_TITLE_PATTERNS)
+
+
+def _problem_group_key(title: str, body: str) -> str:
+    normalized_title = _normalize_group_key(title)
+    if normalized_title not in GENERIC_GROUP_KEYS:
+        return normalized_title
+
+    combined = f"{title} {body}"
+    category = _category_for(combined).lower()
+    terms = _keywords(combined, limit=5)
+    if terms:
+        return " ".join([category, *terms[:4]])
+    return normalized_title
 
 
 @dataclass(frozen=True)
@@ -167,31 +296,77 @@ class TicketStore:
     def recent_problem_groups(self, days: int = 30, limit: int = 12) -> tuple[pd.DataFrame, list[dict[str, Any]], str | None]:
         latest_date = self.tickets["created_dt"].max()
         if pd.isna(latest_date):
-            recent = self.tickets.copy()
+            recent_rows = self.tickets.copy()
             since = None
         else:
             since_dt = latest_date - pd.Timedelta(days=days)
-            recent = self.tickets[self.tickets["created_dt"] >= since_dt].copy()
+            recent_rows = self.tickets[self.tickets["created_dt"] >= since_dt].copy()
             since = since_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        recent["group_key"] = recent["title"].map(lambda title: _normalize_group_key(_clean_text(title)))
+        recent = recent_rows.sort_values("created_dt", ascending=False).drop_duplicates("id", keep="first").copy()
+        recent = recent[~recent["title"].map(lambda title: _is_ignored_title(_clean_text(title)))].copy()
+        recent["group_key"] = recent.apply(
+            lambda row: _problem_group_key(_clean_text(row.get("title")), _clean_text(row.get("clean_body"))),
+            axis=1,
+        )
         grouped: list[dict[str, Any]] = []
         for key, group in recent.groupby("group_key", dropna=False):
             group = group.sort_values("created_dt", ascending=False)
+            count = int(group["id"].nunique())
+            first_seen_dt = group["created_dt"].min()
+            last_seen_dt = group["created_dt"].max()
+            recent_count = 0
+            if latest_date is not None and not pd.isna(latest_date):
+                recent_count = int(group[group["created_dt"] >= latest_date - pd.Timedelta(days=7)]["id"].nunique())
+            combined_text = " ".join(
+                _clean_text(value)
+                for value in pd.concat([group["title"].head(12), group["clean_body"].head(12)], ignore_index=True).tolist()
+            )
+            lowered = combined_text.lower()
+            high_impact_count = sum(1 for term in HIGH_IMPACT_TERMS if term in lowered)
+            priority, priority_score = _priority_for(count, recent_count, high_impact_count)
+            latest_tickets = []
+            for _, row in group.head(6).iterrows():
+                latest_tickets.append(
+                    {
+                        "id": self._json_value(row.get("id")),
+                        "created": self._json_value(row.get("created")),
+                        "title": _clean_text(row.get("title")) or "Senza titolo",
+                        "poster": self._json_value(row.get("poster")),
+                        "excerpt": _excerpt(_clean_text(row.get("clean_body")), 360),
+                    }
+                )
             titles = [_clean_text(title) for title in group["title"].head(3).tolist()]
             grouped.append(
                 {
                     "key": str(key),
                     "title": titles[0] if titles else str(key),
-                    "count": int(len(group)),
-                    "first_seen": self._date_value(group["created_dt"].min()),
-                    "last_seen": self._date_value(group["created_dt"].max()),
-                    "sample_ticket_ids": [self._json_value(value) for value in group["id"].head(5).tolist()],
+                    "count": count,
+                    "unique_ticket_count": count,
+                    "priority": priority,
+                    "priority_score": priority_score,
+                    "category": _category_for(combined_text),
+                    "trend": _trend_for(count, recent_count, last_seen_dt, latest_date),
+                    "recurring": count >= 2,
+                    "first_seen": self._date_value(first_seen_dt),
+                    "last_seen": self._date_value(last_seen_dt),
+                    "sample_ticket_ids": [self._json_value(value) for value in group["id"].head(8).tolist()],
                     "sample_titles": titles,
+                    "keywords": _keywords(combined_text),
+                    "latest_tickets": latest_tickets,
                 }
             )
 
-        grouped.sort(key=lambda item: (item["count"], item["last_seen"] or ""), reverse=True)
+        priority_rank = {"Alta": 3, "Media": 2, "Bassa": 1}
+        grouped.sort(
+            key=lambda item: (
+                priority_rank.get(str(item["priority"]), 0),
+                item["priority_score"],
+                item["count"],
+                item["last_seen"] or "",
+            ),
+            reverse=True,
+        )
         return recent, grouped[:limit], since
 
     def recent_sample_for_prompt(self, days: int = 30, limit: int = 80) -> list[dict[str, Any]]:

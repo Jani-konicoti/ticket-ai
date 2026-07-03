@@ -72,26 +72,29 @@ class OpenAIService:
         )
         return self._generate_text(system, user)
 
-    def summarize_recent_problems(self, tickets: list[dict[str, Any]]) -> str | None:
+    def summarize_recent_problems(self, tickets: list[dict[str, Any]], groups: list[dict[str, Any]] | None = None) -> str | None:
         if not self.client or not tickets:
             return None
 
-        compact_json = json.dumps(tickets, ensure_ascii=False)
+        compact_json = json.dumps({"groups": groups or [], "recent_tickets": tickets}, ensure_ascii=False)
         system = (
             "Sei un analista di ticketing. Devi individuare problemi ricorrenti o recenti. "
-            "Rispondi in italiano, in modo sintetico e operativo. "
+            "Rispondi in italiano, in modo dettagliato ma operativo. "
             "Usa Markdown semplice, senza tabelle."
         )
         user = (
-            "Analizza questi ticket recenti e indica gli ultimi problemi noti. "
-            "Raggruppa i casi simili, segnala urgenze o regressioni possibili, e cita ID ticket.\n\n"
+            "Analizza questi ticket recenti e i gruppi gia' calcolati. "
+            "Dai piu' peso ai gruppi con priority Alta/Media, ai count elevati e ai trend in aumento. "
+            "Non inventare dati: cita sempre ID ticket presenti nel JSON.\n\n"
             "Formato obbligatorio:\n"
             "## Priorita operative\n"
-            "- [Alta] problema, impatto e ticket citati.\n"
-            "- [Media] problema, impatto e ticket citati.\n\n"
+            "- [Alta] problema; perche' e' alta; impatto; ticket citati; prima azione.\n"
+            "- [Media] problema; perche' e' media; impatto; ticket citati; prima azione.\n\n"
             "## Problemi ricorrenti\n"
             "### Nome problema\n"
+            "- Frequenza: numero casi, periodo, trend.\n"
             "- Evidenze: cosa sta succedendo e ticket citati.\n"
+            "- Possibile causa: solo se emerge dai ticket, altrimenti scrivi da verificare.\n"
             "- Azione: cosa verificare o fare.\n\n"
             "## Da monitorare\n"
             "- Elementi da tenere sotto controllo nei prossimi giorni.\n\n"
