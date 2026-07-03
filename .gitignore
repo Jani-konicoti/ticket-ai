@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+backend/*.sqlite
+
+frontend/node_modules/
+frontend/dist/
+
+FAISS/
+FAISS_build/
+FAISS_old/
+FAISS_old2/
+logs/
