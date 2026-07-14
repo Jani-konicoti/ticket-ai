@@ -12,8 +12,11 @@ import {
   Clock3,
   Database,
   Filter,
+  History,
+  KeyRound,
   Layers,
   Loader2,
+  LogOut,
   MessageSquareText,
   PlayCircle,
   RefreshCcw,
@@ -22,8 +25,12 @@ import {
   Server,
   Settings,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
-  Ticket
+  Ticket,
+  Trash2,
+  UserPlus,
+  Users
 } from "lucide-react";
 import "./styles.css";
 
@@ -132,7 +139,34 @@ type JobResponse = {
   finished_at?: string | null;
 };
 
+type UserRole = "admin" | "user";
+
+type UserResponse = {
+  id: number;
+  username: string;
+  role: UserRole;
+  active: boolean | number;
+  created_at?: string | null;
+};
+
+type Session = {
+  token: string;
+  user: UserResponse;
+};
+
+type ChatHistoryItem = {
+  id: string;
+  created_at: string;
+  question: string;
+  top_k: number;
+  response: AskResponse;
+};
+
 const HITS_PAGE_SIZE = 4;
+const SESSION_KEY = "ticket-ai-session";
+const CHAT_HISTORY_KEY = "ticket-ai-chat-history";
+const ANALYSIS_CACHE_PREFIX = "ticket-ai-analysis";
+const ANALYSIS_CACHE_TTL = 6 * 60 * 60 * 1000;
 
 const exampleQuestions = [
   "Un cliente segnala anomalie nel rinnovo dei CCNL: ci sono casi simili?",
@@ -153,6 +187,27 @@ const emptyConfig: DatabaseConfig = {
   query: "",
   batch_size: 150
 };
+
+function authHeaders(session: Session | null): HeadersInit {
+  return session ? { Authorization: `Bearer ${session.token}` } : {};
+}
+
+function jsonAuthHeaders(session: Session | null): HeadersInit {
+  return { "Content-Type": "application/json", ...authHeaders(session) };
+}
+
+function readJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(key: string, value: unknown) {
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
 
 function renderInlineMarkdown(text: string) {
   const parts = text.split(/(\*\*[^*]+\*\*)/g);
@@ -209,20 +264,31 @@ function SummaryMarkdown({ text }: { text: string }) {
 }
 
 function App() {
-  const [view, setView] = useState<"ask" | "analysis" | "config">("ask");
+  const [session, setSession] = useState<Session | null>(() => readJson<Session | null>(SESSION_KEY, null));
+  const [authChecking, setAuthChecking] = useState(Boolean(readJson<Session | null>(SESSION_KEY, null)));
+  const [view, setView] = useState<"ask" | "analysis" | "config" | "users">("ask");
+  const [analysisTab, setAnalysisTab] = useState<"priorities" | "recurring" | "summary">("priorities");
   const [health, setHealth] = useState<Health | null>(null);
   const [question, setQuestion] = useState("");
   const [topK, setTopK] = useState(8);
   const [askLoading, setAskLoading] = useState(false);
   const [askError, setAskError] = useState("");
+  const [askCacheHit, setAskCacheHit] = useState(false);
   const [answer, setAnswer] = useState<AskResponse | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>(() => readJson<ChatHistoryItem[]>(CHAT_HISTORY_KEY, []));
   const [hitPage, setHitPage] = useState(1);
   const [days, setDays] = useState(30);
   const [analysis, setAnalysis] = useState<RecentProblemsResponse | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
+  const [analysisFromCache, setAnalysisFromCache] = useState(false);
   const [priorityFilter, setPriorityFilter] = useState<"all" | "Alta" | "Media" | "Bassa" | "recurring">("all");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [users, setUsers] = useState<UserResponse[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState("");
+  const [usersMessage, setUsersMessage] = useState("");
+  const [newUser, setNewUser] = useState({ username: "", password: "", role: "user" as UserRole });
   const [config, setConfig] = useState<DatabaseConfig>(emptyConfig);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
@@ -233,28 +299,50 @@ function App() {
   const [job, setJob] = useState<JobResponse | null>(null);
 
   useEffect(() => {
-    fetch("/api/health")
-      .then((response) => response.json())
-      .then(setHealth)
-      .catch((error) => setHealth({ ok: false, error: String(error) }));
+    if (!session) {
+      setAuthChecking(false);
+      return;
+    }
+    fetch("/api/auth/me", { headers: authHeaders(session) })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Sessione scaduta");
+        const user = await response.json();
+        const nextSession = { ...session, user };
+        setSession(nextSession);
+        writeJson(SESSION_KEY, nextSession);
+      })
+      .catch(() => {
+        setSession(null);
+        window.localStorage.removeItem(SESSION_KEY);
+      })
+      .finally(() => setAuthChecking(false));
   }, []);
 
   useEffect(() => {
+    if (!session) return;
+    refreshHealth();
+  }, [session?.token]);
+
+  useEffect(() => {
+    if (!session) return;
     if (view === "analysis" && !analysis && !analysisLoading) {
       loadAnalysis();
     }
-    if (view === "config" && !configLoading && !config.ssh_host && !config.query) {
+    if (view === "config" && session.user.role === "admin" && !configLoading && !config.ssh_host && !config.query) {
       loadConfig();
     } else if (view === "config") {
       loadLatestJob();
     }
-  }, [view]);
+    if (view === "users" && session.user.role === "admin" && !users.length && !usersLoading) {
+      loadUsers();
+    }
+  }, [view, session?.token]);
 
   useEffect(() => {
     if (!job || !["queued", "running"].includes(job.status)) return;
     const timer = window.setInterval(async () => {
       try {
-        const response = await fetch(`/api/index/jobs/${job.id}`);
+          const response = await fetch(`/api/index/jobs/${job.id}`, { headers: authHeaders(session) });
         const payload = await response.json();
         if (response.ok) {
           setJob(payload);
@@ -290,6 +378,10 @@ function App() {
     if (priorityFilter === "recurring") return analysis.groups.filter((group) => group.recurring);
     return analysis.groups.filter((group) => group.priority === priorityFilter);
   }, [analysis, priorityFilter]);
+  const recurringProblemGroups = useMemo(() => {
+    if (!analysis) return [];
+    return analysis.groups.filter((group) => group.recurring);
+  }, [analysis]);
 
   function toggleProblemGroup(key: string) {
     setExpandedGroups((current) => {
@@ -306,6 +398,16 @@ function App() {
   async function submitQuestion(event?: React.FormEvent) {
     event?.preventDefault();
     if (!question.trim()) return;
+    const normalizedQuestion = question.trim();
+    const cached = chatHistory.find((item) => item.question.trim().toLowerCase() === normalizedQuestion.toLowerCase() && item.top_k === topK);
+    if (cached) {
+      setAskCacheHit(true);
+      setAskError("");
+      setAnswer(cached.response);
+      setHitPage(1);
+      return;
+    }
+    setAskCacheHit(false);
     setAskLoading(true);
     setAskError("");
     setAnswer(null);
@@ -313,12 +415,24 @@ function App() {
     try {
       const response = await fetch("/api/ask", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, top_k: topK })
+        headers: jsonAuthHeaders(session),
+        body: JSON.stringify({ question: normalizedQuestion, top_k: topK })
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Errore durante la ricerca");
       setAnswer(payload);
+      const nextHistory = [
+        {
+          id: `${Date.now()}`,
+          created_at: new Date().toISOString(),
+          question: normalizedQuestion,
+          top_k: topK,
+          response: payload
+        },
+        ...chatHistory.filter((item) => item.question.trim().toLowerCase() !== normalizedQuestion.toLowerCase()).slice(0, 24)
+      ];
+      setChatHistory(nextHistory);
+      writeJson(CHAT_HISTORY_KEY, nextHistory);
     } catch (error) {
       setAskError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -335,14 +449,28 @@ function App() {
     }
   }
 
-  async function loadAnalysis(nextDays = days) {
+  async function loadAnalysis(nextDays = days, force = false) {
     setAnalysisLoading(true);
     setAnalysisError("");
+    const cacheKey = `${ANALYSIS_CACHE_PREFIX}:${health?.vectors ?? "unknown"}:${nextDays}`;
+    if (!force) {
+      const cached = readJson<{ saved_at: number; payload: RecentProblemsResponse } | null>(cacheKey, null);
+      if (cached && Date.now() - cached.saved_at < ANALYSIS_CACHE_TTL) {
+        setAnalysis(cached.payload);
+        setAnalysisFromCache(true);
+        setAnalysisLoading(false);
+        return;
+      }
+    }
     try {
-      const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24&include_ai=true`);
+      const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24&include_ai=true`, {
+        headers: authHeaders(session)
+      });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Errore durante l'analisi");
       setAnalysis(payload);
+      setAnalysisFromCache(false);
+      writeJson(cacheKey, { saved_at: Date.now(), payload });
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -354,7 +482,7 @@ function App() {
     setConfigLoading(true);
     setConfigError("");
     try {
-      const response = await fetch("/api/config");
+      const response = await fetch("/api/config", { headers: authHeaders(session) });
       const payload: ConfigResponse = await response.json();
       if (!response.ok) throw new Error((payload as any).detail || "Errore caricamento configurazione");
       setConfig(payload.config);
@@ -370,7 +498,7 @@ function App() {
 
   async function loadLatestJob() {
     try {
-      const response = await fetch("/api/index/jobs/latest");
+      const response = await fetch("/api/index/jobs/latest", { headers: authHeaders(session) });
       const payload = await response.json();
       if (response.ok && payload && ["queued", "running", "failed"].includes(payload.status)) {
         setJob(payload);
@@ -382,7 +510,7 @@ function App() {
 
   async function refreshLatestDate() {
     try {
-      const response = await fetch("/api/index/latest-date");
+      const response = await fetch("/api/index/latest-date", { headers: authHeaders(session) });
       const payload = await response.json();
       if (response.ok) setLatestLocalDate(payload.latest_local_ticket_date ?? null);
     } catch {
@@ -397,7 +525,7 @@ function App() {
     try {
       const response = await fetch("/api/config", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonAuthHeaders(session),
         body: JSON.stringify({ config })
       });
       const payload = await response.json();
@@ -424,7 +552,7 @@ function App() {
     try {
       const response = await fetch("/api/index/rebuild", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonAuthHeaders(session),
         body: JSON.stringify({ from_date: rebuildFromDate })
       });
       const payload = await response.json();
@@ -446,7 +574,7 @@ function App() {
     try {
       const response = await fetch("/api/index/rebuild/resume", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: jsonAuthHeaders(session),
         body: JSON.stringify({ from_date: rebuildFromDate })
       });
       const payload = await response.json();
@@ -462,7 +590,7 @@ function App() {
     setConfigMessage("");
     if (!(await saveConfig())) return;
     try {
-      const response = await fetch("/api/index/append", { method: "POST" });
+      const response = await fetch("/api/index/append", { method: "POST", headers: authHeaders(session) });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Errore avvio append");
       setJob(payload);
@@ -471,8 +599,84 @@ function App() {
     }
   }
 
+  function handleLogin(nextSession: Session) {
+    setSession(nextSession);
+    writeJson(SESSION_KEY, nextSession);
+    setView("ask");
+    refreshHealth();
+  }
+
+  async function logout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST", headers: authHeaders(session) });
+    } catch {
+      // Local logout still wins.
+    }
+    setSession(null);
+    setHealth(null);
+    setAnswer(null);
+    setAnalysis(null);
+    window.localStorage.removeItem(SESSION_KEY);
+  }
+
+  async function loadUsers() {
+    setUsersLoading(true);
+    setUsersError("");
+    try {
+      const response = await fetch("/api/users", { headers: authHeaders(session) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore caricamento utenti");
+      setUsers(payload);
+    } catch (error) {
+      setUsersError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUsersLoading(false);
+    }
+  }
+
+  async function createUser(event: React.FormEvent) {
+    event.preventDefault();
+    setUsersError("");
+    setUsersMessage("");
+    try {
+      const response = await fetch("/api/users", {
+        method: "POST",
+        headers: jsonAuthHeaders(session),
+        body: JSON.stringify(newUser)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore creazione utente");
+      setUsers((current) => [...current, payload]);
+      setNewUser({ username: "", password: "", role: "user" });
+      setUsersMessage("Utente creato.");
+    } catch (error) {
+      setUsersError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function loadHistoryItem(item: ChatHistoryItem) {
+    setQuestion(item.question);
+    setTopK(item.top_k);
+    setAnswer(item.response);
+    setAskCacheHit(true);
+    setHitPage(1);
+  }
+
+  function clearChatHistory() {
+    setChatHistory([]);
+    window.localStorage.removeItem(CHAT_HISTORY_KEY);
+  }
+
   function updateConfig<K extends keyof DatabaseConfig>(key: K, value: DatabaseConfig[K]) {
     setConfig((current) => ({ ...current, [key]: value }));
+  }
+
+  if (authChecking) {
+    return <LoadingPanel label="Verifico la sessione..." />;
+  }
+
+  if (!session) {
+    return <LoginPage onLogin={handleLogin} />;
   }
 
   return (
@@ -486,9 +690,18 @@ function App() {
           <h1>Knowledge Assistant</h1>
           <p>Trova casi simili, soluzioni gia' viste e problemi ricorrenti senza scavare a mano nei ticket.</p>
         </div>
-        <div className={`status ${status.ok ? "status-ok" : "status-warn"}`}>
-          {status.ok ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-          <span>{status.label}</span>
+        <div className="hero-actions">
+          <div className={`status ${status.ok ? "status-ok" : "status-warn"}`}>
+            {status.ok ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
+            <span>{status.label}</span>
+          </div>
+          <span className="soft-chip">
+            <ShieldCheck size={15} />
+            {session.user.username} · {session.user.role}
+          </span>
+          <button className="icon-button" onClick={logout} aria-label="Logout">
+            <LogOut size={18} />
+          </button>
         </div>
       </section>
 
@@ -508,10 +721,18 @@ function App() {
           <BarChart3 size={18} />
           Problemi noti
         </button>
-        <button className={view === "config" ? "active" : ""} onClick={() => setView("config")}>
-          <Settings size={18} />
-          Configurazione
-        </button>
+        {session.user.role === "admin" ? (
+          <>
+            <button className={view === "config" ? "active" : ""} onClick={() => setView("config")}>
+              <Settings size={18} />
+              Configurazione
+            </button>
+            <button className={view === "users" ? "active" : ""} onClick={() => setView("users")}>
+              <Users size={18} />
+              Utenti
+            </button>
+          </>
+        ) : null}
       </nav>
 
       {view === "ask" ? (
@@ -551,6 +772,32 @@ function App() {
 
           {askError ? <ErrorBlock message={askError} /> : null}
           {askLoading ? <LoadingPanel label="Sto cercando ticket simili e preparando la risposta..." /> : null}
+          {askCacheHit ? <div className="success-block">Risposta caricata dalla cronologia locale.</div> : null}
+
+          {chatHistory.length ? (
+            <section className="history-panel elevated-panel">
+              <div className="list-header">
+                <div className="panel-title">
+                  <History size={19} />
+                  <div>
+                    <h2>Cronologia domande</h2>
+                    <p>{chatHistory.length} risposte salvate nel browser</p>
+                  </div>
+                </div>
+                <button className="icon-button" onClick={clearChatHistory} aria-label="Svuota cronologia">
+                  <Trash2 size={18} />
+                </button>
+              </div>
+              <div className="history-list">
+                {chatHistory.slice(0, 6).map((item) => (
+                  <button key={item.id} type="button" onClick={() => loadHistoryItem(item)}>
+                    <span>{new Date(item.created_at).toLocaleString("it-IT")}</span>
+                    <strong>{item.question}</strong>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {answer ? (
             <div className="search-results">
@@ -641,7 +888,8 @@ function App() {
                   <option value={180}>Ultimi 180 giorni</option>
                 </select>
               </label>
-              <button className="icon-button" onClick={() => loadAnalysis()} disabled={analysisLoading} aria-label="Aggiorna analisi">
+              {analysisFromCache ? <span className="soft-chip">Cache browser</span> : null}
+              <button className="icon-button" onClick={() => loadAnalysis(days, true)} disabled={analysisLoading} aria-label="Aggiorna analisi">
                 {analysisLoading ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
               </button>
             </div>
@@ -671,6 +919,22 @@ function App() {
                 <Metric icon={<Clock3 size={18} />} label="Dal" value={analysis.since?.slice(0, 10) ?? "-"} />
               </section>
 
+              <nav className="subtabs elevated-panel" aria-label="Vista problemi noti">
+                <button className={analysisTab === "priorities" ? "active" : ""} onClick={() => setAnalysisTab("priorities")}>
+                  <ShieldAlert size={18} />
+                  Priorita
+                </button>
+                <button className={analysisTab === "recurring" ? "active" : ""} onClick={() => setAnalysisTab("recurring")}>
+                  <BarChart3 size={18} />
+                  Ricorrenti
+                </button>
+                <button className={analysisTab === "summary" ? "active" : ""} onClick={() => setAnalysisTab("summary")}>
+                  <Sparkles size={18} />
+                  Sintesi
+                </button>
+              </nav>
+
+              {analysisTab === "priorities" ? (
               <section className="known-problems-panel elevated-panel">
                 <div className="list-header">
                   <div className="panel-title">
@@ -729,7 +993,34 @@ function App() {
                   ))}
                 </div>
               </section>
+              ) : null}
 
+              {analysisTab === "recurring" ? (
+              <section className="known-problems-panel elevated-panel">
+                <div className="list-header">
+                  <div className="panel-title">
+                    <BarChart3 size={19} />
+                    <div>
+                      <h2>Problemi ricorrenti</h2>
+                      <p>{recurringProblemGroups.length.toLocaleString("it-IT")} gruppi con piu' ticket collegati</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="known-problem-list">
+                  {recurringProblemGroups.map((group, index) => (
+                    <ProblemGroupCard
+                      expanded={expandedGroups.has(group.key)}
+                      group={group}
+                      index={index}
+                      key={group.key}
+                      onToggle={() => toggleProblemGroup(group.key)}
+                    />
+                  ))}
+                </div>
+              </section>
+              ) : null}
+
+              {analysisTab === "summary" ? (
               <section className="answer-panel summary-panel elevated-panel">
                 <div className="panel-title spaced-title">
                   <div>
@@ -751,12 +1042,13 @@ function App() {
                 )}
                 {analysis.ai_error ? <p className="model-line">Sintesi IA non disponibile: {analysis.ai_error}</p> : null}
               </section>
+              ) : null}
             </>
           ) : analysisLoading ? null : (
             <div className="empty-state">Nessun dato caricato.</div>
           )}
         </section>
-      ) : (
+      ) : view === "config" && session.user.role === "admin" ? (
         <section className="workspace fade-in">
           <div className="analysis-toolbar elevated-panel">
             <div className="toolbar-copy">
@@ -883,7 +1175,128 @@ function App() {
 
           {job ? <JobProgress job={job} /> : null}
         </section>
+      ) : view === "users" && session.user.role === "admin" ? (
+        <section className="workspace fade-in">
+          <div className="analysis-toolbar elevated-panel">
+            <div className="toolbar-copy">
+              <h2>Utenti</h2>
+              <p>Gestisci accessi e ruoli dell'assistente.</p>
+            </div>
+            <div className="toolbar-actions">
+              <button className="icon-button" onClick={loadUsers} disabled={usersLoading} aria-label="Ricarica utenti">
+                {usersLoading ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
+              </button>
+            </div>
+          </div>
+
+          {usersError ? <ErrorBlock message={usersError} /> : null}
+          {usersMessage ? <div className="success-block">{usersMessage}</div> : null}
+
+          <section className="user-admin-grid">
+            <form className="config-panel elevated-panel" onSubmit={createUser}>
+              <div className="panel-title">
+                <UserPlus size={19} />
+                <h2>Crea utente</h2>
+              </div>
+              <div className="form-grid">
+                <Field label="Username" value={newUser.username} onChange={(value) => setNewUser((current) => ({ ...current, username: value }))} />
+                <Field
+                  label="Password"
+                  type="password"
+                  value={newUser.password}
+                  onChange={(value) => setNewUser((current) => ({ ...current, password: value }))}
+                />
+                <label className="field">
+                  <span>Ruolo</span>
+                  <select value={newUser.role} onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value as UserRole }))}>
+                    <option value="user">Normal user</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+              </div>
+              <div className="controls-row">
+                <button className="primary-button" type="submit">
+                  <UserPlus size={18} />
+                  Crea utente
+                </button>
+              </div>
+            </form>
+
+            <section className="config-panel elevated-panel">
+              <div className="panel-title">
+                <Users size={19} />
+                <h2>Utenti attivi</h2>
+              </div>
+              <div className="user-list">
+                {users.map((user) => (
+                  <article className="user-row" key={user.id}>
+                    <div>
+                      <strong>{user.username}</strong>
+                      <span>{user.created_at || "creato"}</span>
+                    </div>
+                    <span className={`soft-chip role-${user.role}`}>{user.role}</span>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </section>
+        </section>
+      ) : (
+        <div className="empty-state">Sezione non disponibile per il tuo ruolo.</div>
       )}
+    </main>
+  );
+}
+
+function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Login non riuscito");
+      onLogin(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="login-shell">
+      <section className="login-visual">
+        <img className="brand-logo" src="/centro-paghe-logo.png" alt="Gruppo Centro Paghe" />
+        <h1>Knowledge Assistant</h1>
+        <p>Accedi per cercare casi simili, leggere problemi noti e gestire l'indice in base al tuo ruolo.</p>
+      </section>
+      <form className="login-card elevated-panel" onSubmit={submit}>
+        <div className="panel-title">
+          <KeyRound size={20} />
+          <div>
+            <h2>Accesso</h2>
+            <p>Admin seed: username <strong>admin</strong>, password <strong>admin</strong>.</p>
+          </div>
+        </div>
+        <Field label="Username" value={username} onChange={setUsername} />
+        <Field label="Password" type="password" value={password} onChange={setPassword} />
+        {error ? <ErrorBlock message={error} /> : null}
+        <button className="primary-button" type="submit" disabled={loading || !username || !password}>
+          {loading ? <Loader2 className="spin" size={18} /> : <KeyRound size={18} />}
+          Entra
+        </button>
+      </form>
     </main>
   );
 }

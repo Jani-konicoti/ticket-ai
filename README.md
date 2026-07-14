@@ -33,6 +33,13 @@ corepack pnpm run dev
 
 Apri l'URL mostrato da Vite, di solito `http://localhost:5173`.
 
+Al primo avvio viene creato un utente admin locale in `backend/app_config.sqlite`:
+
+- username: `admin`
+- password: `admin`
+
+Da UI l'admin puo' creare altri utenti con ruolo `admin` o `user`.
+
 Se Node non riesce a verificare il certificato del registry npm, usa lo store certificati di Windows nella sessione corrente:
 
 ```powershell
@@ -61,6 +68,8 @@ Puoi comunque impostare un modello esplicito nel `.env` se hai creato l'indice c
 ## API principali
 
 - `GET /api/health` controlla indice, CSV e configurazione.
+- `POST /api/auth/login` crea una sessione bearer.
+- `GET/POST /api/users` gestisce utenti, solo per admin.
 - `POST /api/ask` cerca ticket simili e genera una risposta con citazioni ai ticket.
 - `GET /api/analysis/recent-problems` raggruppa i ticket recenti per problema noto e produce una sintesi opzionale con OpenAI.
 - `GET/POST /api/config` legge e salva configurazione SSH/DB/query in SQLite locale.
@@ -80,4 +89,13 @@ La query deve restituire queste colonne, in questo ordine:
 id, thread_id, staff_id, user_id, poster, created, title, body
 ```
 
-Per una rebuild, i vecchi file in `FAISS/` vengono spostati in una sottocartella `backup_YYYYMMDD_HHMMSS` dentro `FAISS/`; `FAISS_old/` non viene toccata.
+La rebuild usa una cartella temporanea `FAISS_build/` e pubblica i file finali in `FAISS/` solo a completamento.
+
+## Cache browser
+
+Il frontend salva nel localStorage:
+
+- cronologia delle domande con risposte gia' generate;
+- cache dei problemi noti per periodo e numero vettori FAISS.
+
+Il pulsante di refresh nei problemi noti forza una nuova chiamata e aggiorna la cache.

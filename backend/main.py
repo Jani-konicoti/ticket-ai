@@ -3,12 +3,25 @@ from __future__ import annotations
 import gc
 from functools import lru_cache
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import AuthStore, CurrentUser
 from .config import Settings, get_settings
 from .index_builder import ConfigStore, JobManager, VectorIndexBuilder
-from .models import AskRequest, AskResponse, JobResponse, RecentProblemsResponse, RebuildRequest, SaveConfigRequest, TicketHit
+from .models import (
+    AskRequest,
+    AskResponse,
+    AuthResponse,
+    CreateUserRequest,
+    JobResponse,
+    LoginRequest,
+    RecentProblemsResponse,
+    RebuildRequest,
+    SaveConfigRequest,
+    TicketHit,
+    UserResponse,
+)
 from .openai_service import OpenAIService
 from .ticket_store import TicketStore
 
@@ -28,6 +41,11 @@ def get_config_store() -> ConfigStore:
 
 
 @lru_cache(maxsize=1)
+def get_auth_store() -> AuthStore:
+    return AuthStore(get_settings().faiss_dir.parent / "backend" / "app_config.sqlite")
+
+
+@lru_cache(maxsize=1)
 def get_openai_service() -> OpenAIService:
     settings = get_settings()
     return OpenAIService(
@@ -38,6 +56,28 @@ def get_openai_service() -> OpenAIService:
 
 
 job_manager = JobManager()
+
+
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        return ""
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer":
+        return ""
+    return token.strip()
+
+
+def require_user(authorization: str | None = Header(default=None)) -> CurrentUser:
+    user = get_auth_store().user_for_token(_bearer_token(authorization))
+    if not user:
+        raise HTTPException(status_code=401, detail="Sessione non valida o scaduta.")
+    return user
+
+
+def require_admin(current_user: CurrentUser = Depends(require_user)) -> CurrentUser:
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Permessi insufficienti.")
+    return current_user
 
 
 def get_builder() -> VectorIndexBuilder:
@@ -57,6 +97,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+def login(payload: LoginRequest) -> AuthResponse:
+    user = get_auth_store().authenticate(payload.username, payload.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Username o password non validi.")
+    token = get_auth_store().create_session(user.id)
+    return AuthResponse(
+        token=token,
+        user=UserResponse(id=user.id, username=user.username, role=user.role, active=True, created_at=None),
+    )
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+def me(current_user: CurrentUser = Depends(require_user)) -> UserResponse:
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        role=current_user.role,
+        active=True,
+        created_at=None,
+    )
+
+
+@app.post("/api/auth/logout")
+def logout(authorization: str | None = Header(default=None)) -> dict[str, bool]:
+    token = _bearer_token(authorization)
+    if token:
+        get_auth_store().delete_session(token)
+    return {"ok": True}
+
+
+@app.get("/api/users", response_model=list[UserResponse])
+def list_users(_: CurrentUser = Depends(require_admin)) -> list[UserResponse]:
+    return [UserResponse(**user) for user in get_auth_store().list_users()]
+
+
+@app.post("/api/users", response_model=UserResponse)
+def create_user(payload: CreateUserRequest, _: CurrentUser = Depends(require_admin)) -> UserResponse:
+    try:
+        user = get_auth_store().create_user(payload.username, payload.password, payload.role)  # type: ignore[arg-type]
+        return UserResponse(**user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/health")
@@ -135,7 +220,7 @@ def health() -> dict[str, object]:
 
 
 @app.get("/api/config")
-def read_config() -> dict[str, object]:
+def read_config(_: CurrentUser = Depends(require_admin)) -> dict[str, object]:
     builder = get_builder()
     return {
         "config": get_config_store().get_config(),
@@ -145,18 +230,18 @@ def read_config() -> dict[str, object]:
 
 
 @app.post("/api/config")
-def save_config(payload: SaveConfigRequest) -> dict[str, object]:
+def save_config(payload: SaveConfigRequest, _: CurrentUser = Depends(require_admin)) -> dict[str, object]:
     config = get_config_store().save_config(payload.config)
     return {"config": config}
 
 
 @app.get("/api/index/latest-date")
-def latest_ticket_date() -> dict[str, object]:
+def latest_ticket_date(_: CurrentUser = Depends(require_admin)) -> dict[str, object]:
     return {"latest_local_ticket_date": get_builder().latest_local_ticket_date()}
 
 
 @app.post("/api/index/rebuild", response_model=JobResponse)
-def rebuild_index(payload: RebuildRequest) -> JobResponse:
+def rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
         config = get_config_store().get_config()
         builder = get_builder()
@@ -169,7 +254,7 @@ def rebuild_index(payload: RebuildRequest) -> JobResponse:
 
 
 @app.post("/api/index/rebuild/resume", response_model=JobResponse)
-def resume_rebuild_index(payload: RebuildRequest) -> JobResponse:
+def resume_rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
         config = get_config_store().get_config()
         builder = get_builder()
@@ -182,7 +267,7 @@ def resume_rebuild_index(payload: RebuildRequest) -> JobResponse:
 
 
 @app.post("/api/index/append", response_model=JobResponse)
-def append_index() -> JobResponse:
+def append_index(_: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
         config = get_config_store().get_config()
         builder = get_builder()
@@ -195,13 +280,13 @@ def append_index() -> JobResponse:
 
 
 @app.get("/api/index/jobs/latest", response_model=JobResponse | None)
-def latest_job() -> JobResponse | None:
+def latest_job(_: CurrentUser = Depends(require_admin)) -> JobResponse | None:
     job = job_manager.latest()
     return JobResponse(**job.to_dict()) if job else None
 
 
 @app.get("/api/index/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: str) -> JobResponse:
+def get_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> JobResponse:
     job = job_manager.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job non trovato")
@@ -209,7 +294,7 @@ def get_job(job_id: str) -> JobResponse:
 
 
 @app.post("/api/ask", response_model=AskResponse)
-def ask(payload: AskRequest) -> AskResponse:
+def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskResponse:
     try:
         store = get_store()
         openai_service = get_openai_service()
@@ -244,6 +329,7 @@ def recent_problems(
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=12, ge=1, le=50),
     include_ai: bool = Query(default=True),
+    _: CurrentUser = Depends(require_user),
 ) -> RecentProblemsResponse:
     try:
         store = get_store()

@@ -26,6 +26,30 @@ class AskResponse(BaseModel):
     embedding_model: str
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    role: str
+    active: bool | int = True
+    created_at: str | None = None
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserResponse
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=4, max_length=200)
+    role: str = Field(pattern="^(admin|user)$")
+
+
 class ProblemGroup(BaseModel):
     key: str
     title: str
