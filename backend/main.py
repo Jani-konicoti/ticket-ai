@@ -37,12 +37,12 @@ def get_store() -> TicketStore:
 
 @lru_cache(maxsize=1)
 def get_config_store() -> ConfigStore:
-    return ConfigStore(get_settings().faiss_dir.parent / "backend" / "app_config.sqlite")
+    return ConfigStore(get_settings().app_data_dir / "app_config.sqlite")
 
 
 @lru_cache(maxsize=1)
 def get_auth_store() -> AuthStore:
-    return AuthStore(get_settings().faiss_dir.parent / "backend" / "app_config.sqlite")
+    return AuthStore(get_settings().app_data_dir / "app_config.sqlite")
 
 
 @lru_cache(maxsize=1)

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     openai_chat_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_CHAT_MODEL")
     openai_embedding_model: str = Field(default="auto", alias="OPENAI_EMBEDDING_MODEL")
     faiss_dir: Path = Field(default=Path("FAISS"), alias="FAISS_DIR")
+    app_data_dir: Path = Field(default=Path("backend"), alias="APP_DATA_DIR")
     allowed_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="ALLOWED_ORIGINS",

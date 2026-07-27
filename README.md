@@ -47,6 +47,45 @@ $env:NODE_OPTIONS='--use-system-ca'
 corepack pnpm install
 ```
 
+## Avvio con Docker
+
+Il progetto puo' essere avviato su server con Docker Compose. Il frontend viene servito da Nginx sulla porta `8080`, mentre il backend resta interno alla rete Compose.
+
+```powershell
+copy .env.example .env
+# modifica .env e inserisci OPENAI_API_KEY
+docker compose up -d --build
+```
+
+Apri:
+
+```text
+http://localhost:8080
+```
+
+Cartelle persistenti usate dal Compose:
+
+- `./FAISS` -> indice FAISS, CSV e ids.
+- `./data` -> SQLite locale con utenti, sessioni e configurazione SSH/DB/query.
+
+Nel container vengono impostati:
+
+```env
+FAISS_DIR=/app/FAISS
+APP_DATA_DIR=/app/data
+ALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+```
+
+Comandi utili:
+
+```powershell
+docker compose logs -f backend
+docker compose logs -f frontend
+docker compose down
+docker compose pull
+docker compose up -d --build
+```
+
 ## Configurazione
 
 Le opzioni principali sono in `.env`:
@@ -56,6 +95,7 @@ OPENAI_API_KEY=...
 OPENAI_CHAT_MODEL=gpt-4.1-mini
 OPENAI_EMBEDDING_MODEL=auto
 FAISS_DIR=FAISS
+APP_DATA_DIR=backend
 ```
 
 Con `OPENAI_EMBEDDING_MODEL=auto`:
