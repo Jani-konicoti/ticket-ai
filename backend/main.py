@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import gc
+import logging
+import threading
+import time
+from datetime import datetime
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from .analysis_cache import ANALYSIS_PERIODS, AnalysisCacheStore
 from .auth import AuthStore, CurrentUser
 from .config import Settings, get_settings
-from .index_builder import ConfigStore, JobManager, VectorIndexBuilder
+from .index_builder import ConfigStore, JobManager, JobState, VectorIndexBuilder
 from .models import (
     AskRequest,
     AskResponse,
@@ -26,6 +31,7 @@ from .openai_service import OpenAIService
 from .ticket_store import TicketStore
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Ticket Knowledge Assistant", version="0.1.0")
 
 
@@ -46,6 +52,11 @@ def get_auth_store() -> AuthStore:
 
 
 @lru_cache(maxsize=1)
+def get_analysis_cache_store() -> AnalysisCacheStore:
+    return AnalysisCacheStore(get_settings().app_data_dir / "app_config.sqlite")
+
+
+@lru_cache(maxsize=1)
 def get_openai_service() -> OpenAIService:
     settings = get_settings()
     return OpenAIService(
@@ -56,6 +67,8 @@ def get_openai_service() -> OpenAIService:
 
 
 job_manager = JobManager()
+analysis_job_manager = JobManager()
+_scheduler_started = False
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -97,6 +110,88 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _build_recent_problems_payload(days: int, limit: int = 24) -> RecentProblemsResponse:
+    store = get_store()
+    recent, groups, since = store.recent_problem_groups(days=days, limit=limit)
+    ai_summary = None
+    ai_error = None
+    openai_service = get_openai_service()
+    if openai_service.configured():
+        try:
+            ai_summary = openai_service.summarize_recent_problems(store.recent_sample_for_prompt(days=days), groups)
+        except Exception as exc:
+            ai_error = str(exc)
+            logger.exception("AI summary failed for recent problems, %s days", days)
+    priority_counts = {"Alta": 0, "Media": 0, "Bassa": 0}
+    for group in groups:
+        priority = str(group.get("priority", "Bassa"))
+        priority_counts[priority] = priority_counts.get(priority, 0) + 1
+    return RecentProblemsResponse(
+        since=since,
+        total_recent_tickets=len(recent),
+        groups=groups,
+        priority_counts=priority_counts,
+        recurring_count=sum(1 for group in groups if group.get("recurring")),
+        ai_summary=ai_summary,
+        ai_error=ai_error,
+        vector_count=store.stats.vectors,
+    )
+
+
+def _refresh_recent_problem_cache(periods: tuple[int, ...], job: JobState, source: str) -> None:
+    cache = get_analysis_cache_store()
+    job.step = "Preparazione analisi"
+    job.total = len(periods)
+    job.current = 0
+    job.processed = 0
+    job.written = 0
+    job.message = f"Aggiornamento problemi noti: {', '.join(str(days) for days in periods)} giorni."
+    for days in periods:
+        job.step = f"Analisi {days} giorni"
+        payload = _build_recent_problems_payload(days=days, limit=24)
+        saved = cache.save(
+            days=days,
+            payload=payload.model_dump(),
+            vector_count=payload.vector_count,
+            ticket_count=payload.total_recent_tickets,
+        )
+        job.current += 1
+        job.processed += payload.total_recent_tickets
+        job.written += len(payload.groups)
+        job.chunks += 1
+        job.message = f"Periodo {days} giorni salvato nel DB alle {saved['generated_at']}."
+    cache.set_state(f"analysis_last_{source}", datetime.now().date().isoformat())
+
+
+def _analysis_scheduler_loop() -> None:
+    while True:
+        try:
+            settings = get_settings()
+            now = datetime.now()
+            if now.hour == settings.analysis_schedule_hour:
+                cache = get_analysis_cache_store()
+                today = now.date().isoformat()
+                if cache.get_state("analysis_last_nightly") != today and not analysis_job_manager.active():
+                    cache.set_state("analysis_last_nightly", today)
+                    analysis_job_manager.start(
+                        "analysis_nightly",
+                        lambda state: _refresh_recent_problem_cache(ANALYSIS_PERIODS, state, "nightly"),
+                    )
+        except Exception:
+            logger.exception("Nightly analysis scheduler failed")
+        time.sleep(60)
+
+
+@app.on_event("startup")
+def start_analysis_scheduler() -> None:
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+    thread = threading.Thread(target=_analysis_scheduler_loop, daemon=True)
+    thread.start()
 
 
 @app.post("/api/auth/login", response_model=AuthResponse)
@@ -293,6 +388,32 @@ def get_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> JobResponse
     return JobResponse(**job.to_dict())
 
 
+@app.post("/api/analysis/recent-problems/run", response_model=JobResponse)
+def run_recent_problems_analysis(_: CurrentUser = Depends(require_admin)) -> JobResponse:
+    try:
+        job = analysis_job_manager.start(
+            "analysis_manual",
+            lambda state: _refresh_recent_problem_cache(ANALYSIS_PERIODS, state, "manual"),
+        )
+        return JobResponse(**job.to_dict())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/analysis/jobs/latest", response_model=JobResponse | None)
+def latest_analysis_job(_: CurrentUser = Depends(require_admin)) -> JobResponse | None:
+    job = analysis_job_manager.latest()
+    return JobResponse(**job.to_dict()) if job else None
+
+
+@app.get("/api/analysis/jobs/{job_id}", response_model=JobResponse)
+def get_analysis_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> JobResponse:
+    job = analysis_job_manager.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job non trovato")
+    return JobResponse(**job.to_dict())
+
+
 @app.post("/api/ask", response_model=AskResponse)
 def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskResponse:
     try:
@@ -332,30 +453,22 @@ def recent_problems(
     _: CurrentUser = Depends(require_user),
 ) -> RecentProblemsResponse:
     try:
-        store = get_store()
-        recent, groups, since = store.recent_problem_groups(days=days, limit=limit)
-        ai_summary = None
-        ai_error = None
-        openai_service = get_openai_service()
-        if include_ai and openai_service.configured():
-            try:
-                ai_summary = openai_service.summarize_recent_problems(store.recent_sample_for_prompt(days=days), groups)
-            except Exception as exc:
-                ai_error = str(exc)
-        priority_counts = {"Alta": 0, "Media": 0, "Bassa": 0}
-        for group in groups:
-            priority = str(group.get("priority", "Bassa"))
-            priority_counts[priority] = priority_counts.get(priority, 0) + 1
-        return RecentProblemsResponse(
-            since=since,
-            total_recent_tickets=len(recent),
-            groups=groups,
-            priority_counts=priority_counts,
-            recurring_count=sum(1 for group in groups if group.get("recurring")),
-            ai_summary=ai_summary,
-            ai_error=ai_error,
-        )
+        if days not in ANALYSIS_PERIODS:
+            raise HTTPException(status_code=400, detail="Periodo non supportato. Usa 7, 30, 90 o 180 giorni.")
+        cached = get_analysis_cache_store().get(days)
+        if not cached:
+            raise HTTPException(
+                status_code=409,
+                detail="Analisi non ancora generata. Un admin puo' avviare Rigenera analisi problemi noti.",
+            )
+        if limit and len(cached.get("groups", [])) > limit:
+            cached["groups"] = cached["groups"][:limit]
+        if not include_ai:
+            cached["ai_summary"] = None
+        return RecentProblemsResponse(**cached)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=f"Indice FAISS non ancora creato: {exc}") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

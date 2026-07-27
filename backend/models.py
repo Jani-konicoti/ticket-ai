@@ -76,6 +76,8 @@ class RecentProblemsResponse(BaseModel):
     recurring_count: int = 0
     ai_summary: str | None = None
     ai_error: str | None = None
+    generated_at: str | None = None
+    vector_count: int = 0
 
 
 class DatabaseConfig(BaseModel):

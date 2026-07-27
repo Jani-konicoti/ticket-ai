@@ -98,6 +98,8 @@ type RecentProblemsResponse = {
   recurring_count: number;
   ai_summary?: string | null;
   ai_error?: string | null;
+  generated_at?: string | null;
+  vector_count: number;
 };
 
 type DatabaseConfig = {
@@ -165,8 +167,6 @@ type ChatHistoryItem = {
 const HITS_PAGE_SIZE = 4;
 const SESSION_KEY = "ticket-ai-session";
 const CHAT_HISTORY_KEY = "ticket-ai-chat-history";
-const ANALYSIS_CACHE_PREFIX = "ticket-ai-analysis";
-const ANALYSIS_CACHE_TTL = 6 * 60 * 60 * 1000;
 
 const exampleQuestions = [
   "Un cliente segnala anomalie nel rinnovo dei CCNL: ci sono casi simili?",
@@ -281,7 +281,7 @@ function App() {
   const [analysis, setAnalysis] = useState<RecentProblemsResponse | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
-  const [analysisFromCache, setAnalysisFromCache] = useState(false);
+  const [analysisJob, setAnalysisJob] = useState<JobResponse | null>(null);
   const [priorityFilter, setPriorityFilter] = useState<"all" | "Alta" | "Media" | "Bassa" | "recurring">("all");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [users, setUsers] = useState<UserResponse[]>([]);
@@ -327,6 +327,7 @@ function App() {
     if (!session) return;
     if (view === "analysis" && !analysis && !analysisLoading) {
       loadAnalysis();
+      if (session.user.role === "admin") loadLatestAnalysisJob();
     }
     if (view === "config" && session.user.role === "admin" && !configLoading && !config.ssh_host && !config.query) {
       loadConfig();
@@ -357,6 +358,25 @@ function App() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, [job?.id, job?.status]);
+
+  useEffect(() => {
+    if (!analysisJob || !["queued", "running"].includes(analysisJob.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/analysis/jobs/${analysisJob.id}`, { headers: authHeaders(session) });
+        const payload = await response.json();
+        if (response.ok) {
+          setAnalysisJob(payload);
+          if (payload.status === "completed") {
+            loadAnalysis(days, true);
+          }
+        }
+      } catch {
+        // Non-blocking: the next poll can recover.
+      }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [analysisJob?.id, analysisJob?.status, days]);
 
   const status = useMemo(() => {
     if (!health) return { label: "Connessione...", ok: false };
@@ -452,18 +472,8 @@ function App() {
   async function loadAnalysis(nextDays = days, force = false) {
     setAnalysisLoading(true);
     setAnalysisError("");
-    const cacheKey = `${ANALYSIS_CACHE_PREFIX}:${health?.vectors ?? "unknown"}:${nextDays}`;
-    if (!force) {
-      const cached = readJson<{ saved_at: number; payload: RecentProblemsResponse } | null>(cacheKey, null);
-      if (cached && Date.now() - cached.saved_at < ANALYSIS_CACHE_TTL) {
-        setAnalysis(cached.payload);
-        setAnalysisFromCache(true);
-        setAnalysisLoading(false);
-        return;
-      }
-    }
     try {
-      const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24&include_ai=true`, {
+      const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24`, {
         headers: authHeaders(session)
       });
       const text = await response.text();
@@ -479,8 +489,6 @@ function App() {
       }
       if (!response.ok) throw new Error(payload.detail || "Errore durante l'analisi");
       setAnalysis(payload as RecentProblemsResponse);
-      setAnalysisFromCache(false);
-      writeJson(cacheKey, { saved_at: Date.now(), payload });
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -515,6 +523,33 @@ function App() {
       }
     } catch {
       // Non-blocking: the configuration page can still be used.
+    }
+  }
+
+  async function loadLatestAnalysisJob() {
+    try {
+      const response = await fetch("/api/analysis/jobs/latest", { headers: authHeaders(session) });
+      const payload = await response.json();
+      if (response.ok && payload && ["queued", "running", "failed"].includes(payload.status)) {
+        setAnalysisJob(payload);
+      }
+    } catch {
+      // Non-blocking: the analysis page can still show the last saved dataset.
+    }
+  }
+
+  async function startAnalysisRefresh() {
+    setAnalysisError("");
+    try {
+      const response = await fetch("/api/analysis/recent-problems/run", {
+        method: "POST",
+        headers: authHeaders(session)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore avvio analisi");
+      setAnalysisJob(payload);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -898,7 +933,21 @@ function App() {
                   <option value={180}>Ultimi 180 giorni</option>
                 </select>
               </label>
-              {analysisFromCache ? <span className="soft-chip">Cache browser</span> : null}
+              {analysis?.generated_at ? <span className="soft-chip">DB: {analysis.generated_at}</span> : <span className="soft-chip">DB condiviso</span>}
+              {session.user.role === "admin" ? (
+                <button
+                  className="primary-action ghost-action"
+                  onClick={startAnalysisRefresh}
+                  disabled={analysisJob?.status === "queued" || analysisJob?.status === "running"}
+                >
+                  {analysisJob?.status === "queued" || analysisJob?.status === "running" ? (
+                    <Loader2 className="spin" size={18} />
+                  ) : (
+                    <PlayCircle size={18} />
+                  )}
+                  Rigenera 4 periodi
+                </button>
+              ) : null}
               <button className="icon-button" onClick={() => loadAnalysis(days, true)} disabled={analysisLoading} aria-label="Aggiorna analisi">
                 {analysisLoading ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
               </button>
@@ -906,6 +955,7 @@ function App() {
           </div>
 
           {analysisError ? <ErrorBlock message={analysisError} /> : null}
+          {analysisJob ? <JobProgress job={analysisJob} /> : null}
           {analysisLoading && !analysis ? <AnalysisSkeleton /> : null}
 
           {analysis ? (
@@ -927,6 +977,7 @@ function App() {
                   value={analysis.recurring_count.toLocaleString("it-IT")}
                 />
                 <Metric icon={<Clock3 size={18} />} label="Dal" value={analysis.since?.slice(0, 10) ?? "-"} />
+                <Metric icon={<Database size={18} />} label="Generata" value={analysis.generated_at?.slice(0, 16) ?? "-"} />
               </section>
 
               <nav className="subtabs elevated-panel" aria-label="Vista problemi noti">
@@ -1407,9 +1458,20 @@ function ProblemGroupCard({
 
 function JobProgress({ job }: { job: JobResponse }) {
   const progress = job.total > 0 ? Math.min(100, Math.round((job.current / job.total) * 100)) : 0;
-  const steps = ["Connessione SSH", "Connessione database", "Conteggio ticket", "Lettura ticket", "Embedding OpenAI", "Scrittura FAISS", "Completato"];
+  const isAnalysisJob = job.type.startsWith("analysis");
+  const steps = isAnalysisJob
+    ? ["Preparazione analisi", "Analisi 7 giorni", "Analisi 30 giorni", "Analisi 90 giorni", "Analisi 180 giorni", "Completato"]
+    : ["Connessione SSH", "Connessione database", "Conteggio ticket", "Lettura ticket", "Embedding OpenAI", "Scrittura FAISS", "Completato"];
   const activeIndex = Math.max(0, steps.findIndex((step) => job.step.includes(step)));
-  const title = job.type === "append" ? "Append FAISS" : job.type === "resume_rebuild" ? "Ripresa rebuild FAISS" : "Ricostruzione FAISS";
+  const title = isAnalysisJob
+    ? job.type === "analysis_nightly"
+      ? "Job notturno problemi noti"
+      : "Rigenerazione problemi noti"
+    : job.type === "append"
+      ? "Append FAISS"
+      : job.type === "resume_rebuild"
+        ? "Ripresa rebuild FAISS"
+        : "Ricostruzione FAISS";
 
   return (
     <section className={`job-panel elevated-panel job-${job.status}`}>
@@ -1430,15 +1492,21 @@ function JobProgress({ job }: { job: JobResponse }) {
       <div className="progress-stats">
         <span>{progress}%</span>
         <span>
-          {job.current.toLocaleString("it-IT")} / {job.total.toLocaleString("it-IT")} righe lette
+          {job.current.toLocaleString("it-IT")} / {job.total.toLocaleString("it-IT")} {isAnalysisJob ? "periodi" : "righe lette"}
         </span>
-        <span>{job.written.toLocaleString("it-IT")} vettori scritti</span>
-        <span>{job.skipped.toLocaleString("it-IT")} saltati nel tentativo</span>
+        <span>{job.written.toLocaleString("it-IT")} {isAnalysisJob ? "gruppi salvati" : "vettori scritti"}</span>
+        <span>{job.skipped.toLocaleString("it-IT")} {isAnalysisJob ? "errori" : "saltati nel tentativo"}</span>
       </div>
-      <p className="muted-line">
-        Tentativo: <strong>{job.attempt || 1}</strong>. Chunk/vettori scritti:{" "}
-        <strong>{job.chunks.toLocaleString("it-IT")}</strong>. I ticket lunghi vengono suddivisi in piu' chunk senza perdere testo.
-      </p>
+      {isAnalysisJob ? (
+        <p className="muted-line">
+          Ticket analizzati nei periodi: <strong>{job.processed.toLocaleString("it-IT")}</strong>. Risultati condivisi salvati in SQLite.
+        </p>
+      ) : (
+        <p className="muted-line">
+          Tentativo: <strong>{job.attempt || 1}</strong>. Chunk/vettori scritti:{" "}
+          <strong>{job.chunks.toLocaleString("it-IT")}</strong>. I ticket lunghi vengono suddivisi in piu' chunk senza perdere testo.
+        </p>
+      )}
 
       <div className="stepper">
         {steps.map((step, index) => (
