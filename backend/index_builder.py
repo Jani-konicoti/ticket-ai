@@ -177,10 +177,76 @@ class ConfigStore:
 
 
 class JobManager:
-    def __init__(self) -> None:
+    def __init__(self, path: Path | None = None, name: str = "default") -> None:
+        self.path = path
+        self.name = name
         self._jobs: dict[str, JobState] = {}
         self._lock = threading.Lock()
         self._active_job_id: str | None = None
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_db()
+            self._load_jobs()
+
+    def _connect(self) -> sqlite3.Connection:
+        assert self.path is not None
+        return sqlite3.connect(self.path)
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS background_jobs (
+                    manager TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (manager, id)
+                )
+                """
+            )
+
+    def _load_jobs(self) -> None:
+        assert self.path is not None
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload
+                FROM background_jobs
+                WHERE manager = ?
+                ORDER BY started_at
+                """,
+                (self.name,),
+            ).fetchall()
+        for row in rows:
+            try:
+                job = JobState(**json.loads(row[0]))
+            except Exception:
+                continue
+            if job.status in {"queued", "running"}:
+                job.status = "failed"
+                job.step = "Interrotto"
+                job.message = "Il backend e' stato riavviato mentre il job era in esecuzione."
+                job.error = "Job interrotto da riavvio backend. Avvia nuovamente l'operazione quando il server e' stabile."
+                job.finished_at = _now()
+                self._save(job)
+            self._jobs[job.id] = job
+
+    def _save(self, job: JobState) -> None:
+        if not self.path:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO background_jobs
+                    (manager, id, type, status, started_at, updated_at, payload)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (self.name, job.id, job.type, job.status, job.started_at, _now(), json.dumps(job.to_dict(), ensure_ascii=False)),
+            )
 
     def start(self, job_type: str, target: Callable[[JobState], None]) -> JobState:
         with self._lock:
@@ -192,6 +258,7 @@ class JobManager:
             job = JobState(id=str(uuid4()), type=job_type)
             self._jobs[job.id] = job
             self._active_job_id = job.id
+            self._save(job)
 
         thread = threading.Thread(target=self._run, args=(job, target), daemon=True)
         thread.start()
@@ -200,34 +267,45 @@ class JobManager:
     def _run(self, job: JobState, target: Callable[[JobState], None]) -> None:
         try:
             job.status = "running"
+            self._save(job)
             target(job)
             if job.status != "failed":
                 job.status = "completed"
                 job.step = "Completato"
                 job.finished_at = _now()
+                self._save(job)
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
             job.message = "Job interrotto. Dettagli tecnici disponibili nel log backend."
             logger.exception("Index job %s failed", job.id)
             job.finished_at = _now()
+            self._save(job)
         finally:
             with self._lock:
                 if self._active_job_id == job.id:
                     self._active_job_id = None
 
     def get(self, job_id: str) -> JobState | None:
-        return self._jobs.get(job_id)
+        job = self._jobs.get(job_id)
+        if job:
+            self._save(job)
+        return job
 
     def latest(self) -> JobState | None:
         if not self._jobs:
             return None
-        return list(self._jobs.values())[-1]
+        job = list(self._jobs.values())[-1]
+        self._save(job)
+        return job
 
     def active(self) -> JobState | None:
         if not self._active_job_id:
             return None
-        return self._jobs.get(self._active_job_id)
+        job = self._jobs.get(self._active_job_id)
+        if job:
+            self._save(job)
+        return job
 
 
 class VectorIndexBuilder:

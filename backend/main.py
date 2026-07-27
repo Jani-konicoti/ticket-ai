@@ -66,8 +66,8 @@ def get_openai_service() -> OpenAIService:
     )
 
 
-job_manager = JobManager()
-analysis_job_manager = JobManager()
+job_manager = JobManager(get_settings().app_data_dir / "app_config.sqlite", name="index")
+analysis_job_manager = JobManager(get_settings().app_data_dir / "app_config.sqlite", name="analysis")
 _scheduler_started = False
 
 

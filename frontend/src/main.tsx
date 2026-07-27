@@ -343,7 +343,7 @@ function App() {
     if (!job || !["queued", "running"].includes(job.status)) return;
     const timer = window.setInterval(async () => {
       try {
-          const response = await fetch(`/api/index/jobs/${job.id}`, { headers: authHeaders(session) });
+        const response = await fetch(`/api/index/jobs/${job.id}`, { headers: authHeaders(session) });
         const payload = await response.json();
         if (response.ok) {
           setJob(payload);
@@ -351,6 +351,15 @@ function App() {
             refreshHealth();
             refreshLatestDate();
           }
+        } else if (response.status === 404) {
+          setJob({
+            ...job,
+            status: "failed",
+            step: "Interrotto",
+            message: "Il backend non trova piu' questo job.",
+            error: payload.detail || "Job non trovato. Probabile riavvio backend durante l'operazione.",
+            finished_at: new Date().toISOString()
+          });
         }
       } catch {
         // Keep the current job snapshot; the next poll can recover.
@@ -370,6 +379,15 @@ function App() {
           if (payload.status === "completed") {
             loadAnalysis(days, true);
           }
+        } else if (response.status === 404) {
+          setAnalysisJob({
+            ...analysisJob,
+            status: "failed",
+            step: "Interrotto",
+            message: "Il backend non trova piu' questo job.",
+            error: payload.detail || "Job non trovato. Probabile riavvio backend durante l'operazione.",
+            finished_at: new Date().toISOString()
+          });
         }
       } catch {
         // Non-blocking: the next poll can recover.
