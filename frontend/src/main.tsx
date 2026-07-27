@@ -466,9 +466,19 @@ function App() {
       const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24&include_ai=true`, {
         headers: authHeaders(session)
       });
-      const payload = await response.json();
+      const text = await response.text();
+      let payload: RecentProblemsResponse | { detail?: string };
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(
+          response.ok
+            ? "Risposta non valida dal server"
+            : `Il server ha risposto ${response.status}: ${response.statusText || "errore proxy"}`
+        );
+      }
       if (!response.ok) throw new Error(payload.detail || "Errore durante l'analisi");
-      setAnalysis(payload);
+      setAnalysis(payload as RecentProblemsResponse);
       setAnalysisFromCache(false);
       writeJson(cacheKey, { saved_at: Date.now(), payload });
     } catch (error) {

@@ -17,7 +17,7 @@ class OpenAIService:
         self.api_key = api_key
         self.chat_model = chat_model
         self.embedding_model = embedding_model
-        self.client = OpenAI(api_key=api_key) if api_key else None
+        self.client = OpenAI(api_key=api_key, timeout=120.0, max_retries=1) if api_key else None
 
     def configured(self) -> bool:
         return self.client is not None
