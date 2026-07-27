@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     faiss_dir: Path = Field(default=Path("FAISS"), alias="FAISS_DIR")
     app_data_dir: Path = Field(default=Path("backend"), alias="APP_DATA_DIR")
     analysis_schedule_hour: int = Field(default=2, ge=0, le=23, alias="ANALYSIS_SCHEDULE_HOUR")
-    index_max_batch_size: int = Field(default=80, ge=1, le=500, alias="INDEX_MAX_BATCH_SIZE")
-    index_save_every_batches: int = Field(default=20, ge=1, le=200, alias="INDEX_SAVE_EVERY_BATCHES")
-    index_batch_pause_seconds: float = Field(default=0.15, ge=0, le=10, alias="INDEX_BATCH_PAUSE_SECONDS")
+    index_max_batch_size: int = Field(default=30, ge=1, le=500, alias="INDEX_MAX_BATCH_SIZE")
+    index_save_every_batches: int = Field(default=40, ge=1, le=200, alias="INDEX_SAVE_EVERY_BATCHES")
+    index_batch_pause_seconds: float = Field(default=0.35, ge=0, le=10, alias="INDEX_BATCH_PAUSE_SECONDS")
     allowed_origins: str = Field(
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="ALLOWED_ORIGINS",

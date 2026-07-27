@@ -235,9 +235,9 @@ class VectorIndexBuilder:
         self,
         faiss_dir: Path,
         openai_api_key: str,
-        max_batch_size: int = 80,
-        save_every_batches: int = 20,
-        batch_pause_seconds: float = 0.15,
+        max_batch_size: int = 30,
+        save_every_batches: int = 40,
+        batch_pause_seconds: float = 0.35,
         on_complete: Callable[[], None] | None = None,
     ) -> None:
         self._set_output_dir(faiss_dir)
