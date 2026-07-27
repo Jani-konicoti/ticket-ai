@@ -101,10 +101,10 @@ INDEX_MAX_BATCH_SIZE=30
 INDEX_SAVE_EVERY_BATCHES=40
 INDEX_BATCH_PAUSE_SECONDS=0.35
 BACKEND_CPUS=1.5
-BACKEND_MEMORY_LIMIT=2500m
+BACKEND_MEMORY_LIMIT=4g
 ```
 
-In Docker il backend ha limiti CPU/RAM configurabili per evitare che rebuild o append saturino l'intero server. I default sono prudenti per una VM da 8 GB con circa 3 GB liberi. Se l'indice FAISS cresce molto e il backend viene ucciso per memoria, alza `BACKEND_MEMORY_LIMIT` a piccoli passi.
+In Docker il backend ha limiti CPU/RAM configurabili per evitare che rebuild o append saturino l'intero server. I default sono prudenti per una VM da 8 GB con indice FAISS grande: batch basso e limite backend a 4 GB.
 
 Con `OPENAI_EMBEDDING_MODEL=auto`:
 

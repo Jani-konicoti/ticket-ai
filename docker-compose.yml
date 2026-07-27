@@ -17,8 +17,8 @@ services:
       - ./data:/app/data
     init: true
     cpus: ${BACKEND_CPUS:-1.5}
-    mem_limit: ${BACKEND_MEMORY_LIMIT:-2500m}
-    memswap_limit: ${BACKEND_MEMORY_LIMIT:-2500m}
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-4g}
+    memswap_limit: ${BACKEND_MEMORY_LIMIT:-4g}
     pids_limit: 256
     restart: unless-stopped
     healthcheck:
