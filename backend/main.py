@@ -168,32 +168,51 @@ def _refresh_recent_problem_cache(periods: tuple[int, ...], job: JobState, sourc
     cache.set_state(f"analysis_last_{source}", datetime.now().date().isoformat())
 
 
-def _analysis_scheduler_loop() -> None:
+def _append_index_until_today(job: JobState, source: str) -> None:
+    config = get_config_store().get_config()
+    builder = get_builder()
+    get_store.cache_clear()
+    gc.collect()
+    builder.append_until_today(config, job)
+    get_analysis_cache_store().set_state(f"index_append_last_{source}", datetime.now().date().isoformat())
+
+
+def _scheduled_jobs_loop() -> None:
     while True:
         try:
             settings = get_settings()
             now = datetime.now()
-            if now.hour == settings.analysis_schedule_hour:
-                cache = get_analysis_cache_store()
-                today = now.date().isoformat()
-                if cache.get_state("analysis_last_nightly") != today and not analysis_job_manager.active():
+            today = now.date().isoformat()
+            cache = get_analysis_cache_store()
+
+            if now.hour == settings.index_append_schedule_hour and cache.get_state("index_append_last_nightly") != today:
+                if not job_manager.active():
+                    cache.set_state("index_append_last_nightly", today)
+                    job_manager.start("append_nightly", lambda state: _append_index_until_today(state, "nightly"))
+                else:
+                    logger.info("Nightly append skipped: another index job is already active.")
+
+            if now.hour >= settings.analysis_schedule_hour and cache.get_state("analysis_last_nightly") != today:
+                if job_manager.active():
+                    logger.info("Nightly analysis waiting: index job is still active.")
+                elif not analysis_job_manager.active():
                     cache.set_state("analysis_last_nightly", today)
                     analysis_job_manager.start(
                         "analysis_nightly",
                         lambda state: _refresh_recent_problem_cache(ANALYSIS_PERIODS, state, "nightly"),
                     )
         except Exception:
-            logger.exception("Nightly analysis scheduler failed")
+            logger.exception("Nightly scheduler failed")
         time.sleep(60)
 
 
 @app.on_event("startup")
-def start_analysis_scheduler() -> None:
+def start_scheduled_jobs() -> None:
     global _scheduler_started
     if _scheduler_started:
         return
     _scheduler_started = True
-    thread = threading.Thread(target=_analysis_scheduler_loop, daemon=True)
+    thread = threading.Thread(target=_scheduled_jobs_loop, daemon=True)
     thread.start()
 
 

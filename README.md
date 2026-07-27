@@ -96,7 +96,8 @@ OPENAI_CHAT_MODEL=gpt-4.1-mini
 OPENAI_EMBEDDING_MODEL=auto
 FAISS_DIR=FAISS
 APP_DATA_DIR=backend
-ANALYSIS_SCHEDULE_HOUR=2
+INDEX_APPEND_SCHEDULE_HOUR=2
+ANALYSIS_SCHEDULE_HOUR=4
 INDEX_MAX_BATCH_SIZE=30
 INDEX_SAVE_EVERY_BATCHES=40
 INDEX_BATCH_PAUSE_SECONDS=0.35
@@ -104,7 +105,7 @@ BACKEND_CPUS=1.5
 BACKEND_MEMORY_LIMIT=4g
 ```
 
-In Docker il backend ha limiti CPU/RAM configurabili per evitare che rebuild o append saturino l'intero server. I default sono prudenti per una VM da 8 GB con indice FAISS grande: batch basso e limite backend a 4 GB.
+In Docker il backend ha limiti CPU/RAM configurabili per evitare che rebuild o append saturino l'intero server. I default sono prudenti per una VM da 8 GB con indice FAISS grande: batch basso e limite backend a 4 GB. Ogni notte l'append FAISS parte alle 02:00, mentre l'analisi dei problemi noti parte dalle 04:00 e attende che l'append sia concluso.
 
 Con `OPENAI_EMBEDDING_MODEL=auto`:
 
