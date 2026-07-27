@@ -97,7 +97,14 @@ OPENAI_EMBEDDING_MODEL=auto
 FAISS_DIR=FAISS
 APP_DATA_DIR=backend
 ANALYSIS_SCHEDULE_HOUR=2
+INDEX_MAX_BATCH_SIZE=80
+INDEX_SAVE_EVERY_BATCHES=20
+INDEX_BATCH_PAUSE_SECONDS=0.15
+BACKEND_CPUS=2.0
+BACKEND_MEMORY_LIMIT=3g
 ```
+
+In Docker il backend ha limiti CPU/RAM configurabili per evitare che rebuild o append saturino l'intero server. Se la macchina ha poca RAM, abbassa `BACKEND_MEMORY_LIMIT`; se l'indice FAISS e' grande, non scendere troppo sotto la dimensione del file `.faiss` piu' circa 1 GB di margine.
 
 Con `OPENAI_EMBEDDING_MODEL=auto`:
 

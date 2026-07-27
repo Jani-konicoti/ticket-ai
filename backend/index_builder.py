@@ -231,9 +231,20 @@ class JobManager:
 
 
 class VectorIndexBuilder:
-    def __init__(self, faiss_dir: Path, openai_api_key: str, on_complete: Callable[[], None] | None = None) -> None:
+    def __init__(
+        self,
+        faiss_dir: Path,
+        openai_api_key: str,
+        max_batch_size: int = 80,
+        save_every_batches: int = 20,
+        batch_pause_seconds: float = 0.15,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
         self._set_output_dir(faiss_dir)
         self.client = OpenAI(api_key=openai_api_key, timeout=90.0, max_retries=2)
+        self.max_batch_size = max(1, int(max_batch_size))
+        self.save_every_batches = max(1, int(save_every_batches))
+        self.batch_pause_seconds = max(0.0, float(batch_pause_seconds))
         self.on_complete = on_complete
 
     def _set_output_dir(self, faiss_dir: Path) -> None:
@@ -429,6 +440,7 @@ class VectorIndexBuilder:
         job.current = 0
         job.processed = 0
         job.skipped = 0
+        effective_batch_size = max(1, min(int(batch_size or self.max_batch_size), self.max_batch_size))
         cursor_count = conn.cursor()
         cursor_count.execute(_count_query(query), params)
         job.total = int(cursor_count.fetchone()[0] or 0)
@@ -440,7 +452,9 @@ class VectorIndexBuilder:
         cursor.execute(query, params)
         batch_texts: list[str] = []
         batch_meta: list[dict[str, Any]] = []
+        pending_meta: list[dict[str, Any]] = []
         batch_tokens = 0
+        flush_count = 0
 
         job.step = "Lettura ticket"
         for row in cursor:
@@ -462,9 +476,12 @@ class VectorIndexBuilder:
             for chunk_index, chunk in enumerate(chunks, start=1):
                 chunk_tokens = self._count_tokens(chunk)
                 if batch_texts and (
-                    len(batch_texts) >= max(1, batch_size) or batch_tokens + chunk_tokens > MAX_EMBED_BATCH_TOKENS
+                    len(batch_texts) >= effective_batch_size or batch_tokens + chunk_tokens > MAX_EMBED_BATCH_TOKENS
                 ):
-                    index = self._flush_batch(index, batch_texts, batch_meta, existing_ids, job)
+                    index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
+                    flush_count += 1
+                    if flush_count % self.save_every_batches == 0:
+                        self._persist_checkpoint(index, pending_meta, job)
                     batch_texts.clear()
                     batch_meta.clear()
                     batch_tokens = 0
@@ -487,21 +504,27 @@ class VectorIndexBuilder:
                 )
             job.processed += 1
 
-            if len(batch_texts) >= max(1, batch_size):
-                index = self._flush_batch(index, batch_texts, batch_meta, existing_ids, job)
+            if len(batch_texts) >= effective_batch_size:
+                index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
+                flush_count += 1
+                if flush_count % self.save_every_batches == 0:
+                    self._persist_checkpoint(index, pending_meta, job)
                 batch_texts.clear()
                 batch_meta.clear()
                 batch_tokens = 0
 
         cursor.close()
         if batch_texts:
-            self._flush_batch(index, batch_texts, batch_meta, existing_ids, job)
+            index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
+        if index is not None and pending_meta:
+            self._persist_checkpoint(index, pending_meta, job)
 
-    def _flush_batch(
+    def _embed_batch(
         self,
         index: faiss.Index | None,
         texts: list[str],
         rows: list[dict[str, Any]],
+        pending_rows: list[dict[str, Any]],
         existing_ids: set[str],
         job: JobState,
     ) -> faiss.Index:
@@ -520,19 +543,36 @@ class VectorIndexBuilder:
 
         job.step = "Scrittura FAISS"
         index.add(embeddings)
+        pending_rows.extend(rows)
+        for row in rows:
+            existing_ids.add(str(row["id"]))
+        job.chunks += len(rows)
+        job.message = (
+            f"Preparati {job.chunks} vettori/chunk; {len(pending_rows)} in attesa del prossimo checkpoint FAISS."
+        )
+        del response, embeddings
+        gc.collect()
+        if self.batch_pause_seconds:
+            time.sleep(self.batch_pause_seconds)
+        return index
+
+    def _persist_checkpoint(self, index: faiss.Index, pending_rows: list[dict[str, Any]], job: JobState) -> None:
+        if not pending_rows:
+            return
+
+        job.step = "Scrittura FAISS"
         self._write_index_atomically(index)
 
         with self.csv_path.open("a", newline="", encoding="utf-8") as csv_file, self.ids_path.open("a", encoding="utf-8") as ids_file:
             writer = csv.writer(csv_file, delimiter=";")
-            for row in rows:
+            for row in pending_rows:
                 writer.writerow([row[column] for column in CSV_COLUMNS])
                 ids_file.write(f"{row['id']}\n")
-                existing_ids.add(str(row["id"]))
                 job.written += 1
-                job.chunks = job.written
 
-        job.message = f"Scritti {job.written} vettori/chunk su FAISS"
-        return index
+        pending_rows.clear()
+        job.message = f"Checkpoint salvato: {job.written} vettori/chunk persistiti su FAISS"
+        gc.collect()
 
     def _publish_build(self, build_dir: Path, final_dir: Path, job: JobState) -> None:
         job.step = "Pubblicazione FAISS"

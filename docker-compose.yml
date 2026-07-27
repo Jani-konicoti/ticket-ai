@@ -9,9 +9,17 @@ services:
       FAISS_DIR: /app/FAISS
       APP_DATA_DIR: /app/data
       ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      INDEX_MAX_BATCH_SIZE: ${INDEX_MAX_BATCH_SIZE:-80}
+      INDEX_SAVE_EVERY_BATCHES: ${INDEX_SAVE_EVERY_BATCHES:-20}
+      INDEX_BATCH_PAUSE_SECONDS: ${INDEX_BATCH_PAUSE_SECONDS:-0.15}
     volumes:
       - ./FAISS:/app/FAISS
       - ./data:/app/data
+    init: true
+    cpus: ${BACKEND_CPUS:-2.0}
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
+    memswap_limit: ${BACKEND_MEMORY_LIMIT:-3g}
+    pids_limit: 256
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=10).read()"]

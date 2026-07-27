@@ -98,6 +98,9 @@ def get_builder() -> VectorIndexBuilder:
     return VectorIndexBuilder(
         faiss_dir=settings.faiss_dir,
         openai_api_key=settings.openai_api_key,
+        max_batch_size=settings.index_max_batch_size,
+        save_every_batches=settings.index_save_every_batches,
+        batch_pause_seconds=settings.index_batch_pause_seconds,
         on_complete=get_store.cache_clear,
     )
 
