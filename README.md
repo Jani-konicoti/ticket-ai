@@ -38,7 +38,7 @@ Al primo avvio viene creato un utente admin locale in `backend/app_config.sqlite
 - username: `admin`
 - password: `admin`
 
-Da UI l'admin puo' creare altri utenti con ruolo `admin` o `user`.
+Da UI l'admin puo' creare altri utenti con ruolo `admin` o `user` e limitare ogni operatore a uno o piu' reparti.
 
 Se Node non riesce a verificare il certificato del registry npm, usa lo store certificati di Windows nella sessione corrente:
 
@@ -119,6 +119,7 @@ Puoi comunque impostare un modello esplicito nel `.env` se hai creato l'indice c
 - `GET /api/health` controlla indice, CSV e configurazione.
 - `POST /api/auth/login` crea una sessione bearer.
 - `GET/POST /api/users` gestisce utenti, solo per admin.
+- `GET /api/filters` restituisce reparti e fonti visibili all'utente autenticato.
 - `POST /api/ask` cerca ticket simili e genera una risposta con citazioni ai ticket.
 - `GET /api/analysis/recent-problems` raggruppa i ticket recenti per problema noto e produce una sintesi opzionale con OpenAI.
 - `GET/POST /api/config` legge e salva configurazione SSH/DB/query in SQLite locale.
@@ -135,8 +136,10 @@ Le operazioni di rebuild/append usano sempre `text-embedding-3-large`.
 La query deve restituire queste colonne, in questo ordine:
 
 ```sql
-id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, ticket_id, ticket_number
+id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, ticket_id, ticket_number, department_id, department_name, ticket_source
 ```
+
+I filtri per reparto e fonte vengono applicati lato backend sia alla chat sia ai problemi noti. Per gli utenti limitati, `Tutti` indica tutti i reparti autorizzati e non l'intero indice.
 
 La rebuild usa una cartella temporanea `FAISS_build/` e pubblica i file finali in `FAISS/` solo a completamento.
 Gli indici vengono suddivisi in segmenti da massimo 20.000 vettori per evitare picchi di memoria durante rebuild e append.

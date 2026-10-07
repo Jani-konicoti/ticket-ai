@@ -5,6 +5,8 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=3, max_length=5000)
     top_k: int = Field(default=8, ge=1, le=20)
     min_score: float | None = None
+    department_id: int | None = None
+    ticket_source: str | None = None
 
 
 class TicketHit(BaseModel):
@@ -15,6 +17,9 @@ class TicketHit(BaseModel):
     ticket_id: int | str | None = None
     ticket_number: int | str | None = None
     ticket_url: str | None = None
+    department_id: int | str | None = None
+    department_name: str | None = None
+    ticket_source: str | None = None
     title: str
     created: str | None = None
     poster: str | None = None
@@ -40,6 +45,8 @@ class UserResponse(BaseModel):
     role: str
     active: bool | int = True
     created_at: str | None = None
+    all_departments: bool = True
+    department_ids: list[int] = Field(default_factory=list)
 
 
 class AuthResponse(BaseModel):
@@ -51,6 +58,13 @@ class CreateUserRequest(BaseModel):
     username: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=4, max_length=200)
     role: str = Field(pattern="^(admin|user)$")
+    all_departments: bool = True
+    department_ids: list[int] = Field(default_factory=list)
+
+
+class UpdateUserDepartmentsRequest(BaseModel):
+    all_departments: bool
+    department_ids: list[int] = Field(default_factory=list)
 
 
 class ProblemGroup(BaseModel):

@@ -4,6 +4,7 @@ import {
   Activity,
   AlertCircle,
   BarChart3,
+  Building2,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
@@ -56,6 +57,9 @@ type Hit = {
   ticket_id?: number | string | null;
   ticket_number?: number | string | null;
   ticket_url?: string | null;
+  department_id?: number | string | null;
+  department_name?: string | null;
+  ticket_source?: string | null;
   title: string;
   created?: string | null;
   poster?: string | null;
@@ -90,6 +94,9 @@ type ProblemGroup = {
     ticket_id?: number | string | null;
     ticket_number?: number | string | null;
     ticket_url?: string | null;
+    department_id?: number | string | null;
+    department_name?: string | null;
+    ticket_source?: string | null;
     created?: string | null;
     title: string;
     poster?: string | null;
@@ -156,6 +163,13 @@ type UserResponse = {
   role: UserRole;
   active: boolean | number;
   created_at?: string | null;
+  all_departments: boolean;
+  department_ids: number[];
+};
+
+type FilterOptions = {
+  departments: Array<{ id: number; name: string }>;
+  sources: string[];
 };
 
 type Session = {
@@ -168,12 +182,18 @@ type ChatHistoryItem = {
   created_at: string;
   question: string;
   top_k: number;
+  department_id: number | null;
+  ticket_source: string;
   response: AskResponse;
 };
 
 const HITS_PAGE_SIZE = 4;
 const SESSION_KEY = "ticket-ai-session";
-const CHAT_HISTORY_KEY = "ticket-ai-chat-history";
+const CHAT_HISTORY_KEY_PREFIX = "ticket-ai-chat-history";
+
+function chatHistoryKey(userId: number) {
+  return `${CHAT_HISTORY_KEY_PREFIX}-${userId}`;
+}
 
 const exampleQuestions = [
   "Un cliente segnala anomalie nel rinnovo dei CCNL: ci sono casi simili?",
@@ -278,13 +298,18 @@ function App() {
   const [health, setHealth] = useState<Health | null>(null);
   const [question, setQuestion] = useState("");
   const [topK, setTopK] = useState(8);
+  const [filterOptions, setFilterOptions] = useState<FilterOptions>({ departments: [], sources: [] });
+  const [chatDepartmentId, setChatDepartmentId] = useState<number | null>(null);
+  const [chatSource, setChatSource] = useState("");
   const [askLoading, setAskLoading] = useState(false);
   const [askError, setAskError] = useState("");
   const [askCacheHit, setAskCacheHit] = useState(false);
   const [answer, setAnswer] = useState<AskResponse | null>(null);
-  const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>(() => readJson<ChatHistoryItem[]>(CHAT_HISTORY_KEY, []));
+  const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const [hitPage, setHitPage] = useState(1);
   const [days, setDays] = useState(30);
+  const [analysisDepartmentId, setAnalysisDepartmentId] = useState<number | null>(null);
+  const [analysisSource, setAnalysisSource] = useState("");
   const [analysis, setAnalysis] = useState<RecentProblemsResponse | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState("");
@@ -295,7 +320,13 @@ function App() {
   const [usersLoading, setUsersLoading] = useState(false);
   const [usersError, setUsersError] = useState("");
   const [usersMessage, setUsersMessage] = useState("");
-  const [newUser, setNewUser] = useState({ username: "", password: "", role: "user" as UserRole });
+  const [newUser, setNewUser] = useState({
+    username: "",
+    password: "",
+    role: "user" as UserRole,
+    all_departments: true,
+    department_ids: [] as number[]
+  });
   const [config, setConfig] = useState<DatabaseConfig>(emptyConfig);
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
@@ -328,7 +359,12 @@ function App() {
   useEffect(() => {
     if (!session) return;
     refreshHealth();
+    loadFilterOptions();
   }, [session?.token]);
+
+  useEffect(() => {
+    setChatHistory(session ? readJson<ChatHistoryItem[]>(chatHistoryKey(session.user.id), []) : []);
+  }, [session?.user.id]);
 
   useEffect(() => {
     if (!session) return;
@@ -444,7 +480,13 @@ function App() {
     event?.preventDefault();
     if (!question.trim()) return;
     const normalizedQuestion = question.trim();
-    const cached = chatHistory.find((item) => item.question.trim().toLowerCase() === normalizedQuestion.toLowerCase() && item.top_k === topK);
+    const cached = chatHistory.find(
+      (item) =>
+        item.question.trim().toLowerCase() === normalizedQuestion.toLowerCase() &&
+        item.top_k === topK &&
+        (item.department_id ?? null) === chatDepartmentId &&
+        (item.ticket_source || "") === chatSource
+    );
     if (cached) {
       setAskCacheHit(true);
       setAskError("");
@@ -461,7 +503,12 @@ function App() {
       const response = await fetch("/api/ask", {
         method: "POST",
         headers: jsonAuthHeaders(session),
-        body: JSON.stringify({ question: normalizedQuestion, top_k: topK })
+        body: JSON.stringify({
+          question: normalizedQuestion,
+          top_k: topK,
+          department_id: chatDepartmentId,
+          ticket_source: chatSource || null
+        })
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Errore durante la ricerca");
@@ -472,12 +519,14 @@ function App() {
           created_at: new Date().toISOString(),
           question: normalizedQuestion,
           top_k: topK,
+          department_id: chatDepartmentId,
+          ticket_source: chatSource,
           response: payload
         },
         ...chatHistory.filter((item) => item.question.trim().toLowerCase() !== normalizedQuestion.toLowerCase()).slice(0, 24)
       ];
       setChatHistory(nextHistory);
-      writeJson(CHAT_HISTORY_KEY, nextHistory);
+      if (session) writeJson(chatHistoryKey(session.user.id), nextHistory);
     } catch (error) {
       setAskError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -494,11 +543,32 @@ function App() {
     }
   }
 
-  async function loadAnalysis(nextDays = days, force = false) {
+  async function loadFilterOptions() {
+    try {
+      const response = await fetch("/api/filters", { headers: authHeaders(session) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore caricamento filtri");
+      setFilterOptions(payload);
+    } catch {
+      setFilterOptions({ departments: [], sources: [] });
+    }
+  }
+
+  async function loadAnalysis(
+    nextDays = days,
+    force = false,
+    nextDepartmentId = analysisDepartmentId,
+    nextSource = analysisSource
+  ) {
     setAnalysisLoading(true);
     setAnalysisError("");
     try {
-      const response = await fetch(`/api/analysis/recent-problems?days=${nextDays}&limit=24`, {
+      const params = new URLSearchParams({ days: String(nextDays), limit: "24" });
+      if (nextDepartmentId !== null) params.set("department_id", String(nextDepartmentId));
+      if (nextSource) params.set("ticket_source", nextSource);
+      const canUseSharedSummary = Boolean(session?.user.all_departments) && nextDepartmentId === null && !nextSource;
+      params.set("include_ai", canUseSharedSummary ? "true" : "false");
+      const response = await fetch(`/api/analysis/recent-problems?${params.toString()}`, {
         headers: authHeaders(session)
       });
       const text = await response.text();
@@ -686,6 +756,8 @@ function App() {
     setHealth(null);
     setAnswer(null);
     setAnalysis(null);
+    setChatHistory([]);
+    setFilterOptions({ departments: [], sources: [] });
     window.localStorage.removeItem(SESSION_KEY);
   }
 
@@ -717,16 +789,42 @@ function App() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "Errore creazione utente");
       setUsers((current) => [...current, payload]);
-      setNewUser({ username: "", password: "", role: "user" });
+      setNewUser({ username: "", password: "", role: "user", all_departments: true, department_ids: [] });
       setUsersMessage("Utente creato.");
     } catch (error) {
       setUsersError(error instanceof Error ? error.message : String(error));
     }
   }
 
+  async function updateUserPermissions(user: UserResponse, allDepartments: boolean, departmentIds: number[]) {
+    setUsersError("");
+    setUsersMessage("");
+    setUsers((current) =>
+      current.map((item) =>
+        item.id === user.id ? { ...item, all_departments: allDepartments, department_ids: departmentIds } : item
+      )
+    );
+    try {
+      const response = await fetch(`/api/users/${user.id}/departments`, {
+        method: "PUT",
+        headers: jsonAuthHeaders(session),
+        body: JSON.stringify({ all_departments: allDepartments, department_ids: departmentIds })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore aggiornamento permessi");
+      setUsers((current) => current.map((item) => (item.id === user.id ? payload : item)));
+      setUsersMessage(`Permessi di ${user.username} aggiornati.`);
+    } catch (error) {
+      setUsersError(error instanceof Error ? error.message : String(error));
+      loadUsers();
+    }
+  }
+
   function loadHistoryItem(item: ChatHistoryItem) {
     setQuestion(item.question);
     setTopK(item.top_k);
+    setChatDepartmentId(item.department_id ?? null);
+    setChatSource(item.ticket_source || "");
     setAnswer(item.response);
     setAskCacheHit(true);
     setHitPage(1);
@@ -734,7 +832,7 @@ function App() {
 
   function clearChatHistory() {
     setChatHistory([]);
-    window.localStorage.removeItem(CHAT_HISTORY_KEY);
+    if (session) window.localStorage.removeItem(chatHistoryKey(session.user.id));
   }
 
   function updateConfig<K extends keyof DatabaseConfig>(key: K, value: DatabaseConfig[K]) {
@@ -821,6 +919,26 @@ function App() {
               onChange={(event) => setQuestion(event.target.value)}
               placeholder="Esempio: Un cliente non riesce a chiudere la questione CCNL da rinnovare..."
             />
+            <div className="filter-row">
+              <label className="select-control">
+                <Building2 size={18} />
+                <span>Reparto</span>
+                <select value={chatDepartmentId ?? ""} onChange={(event) => setChatDepartmentId(event.target.value ? Number(event.target.value) : null)}>
+                  <option value="">Tutti</option>
+                  {filterOptions.departments.map((department) => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="select-control">
+                <Filter size={18} />
+                <span>Fonte</span>
+                <select value={chatSource} onChange={(event) => setChatSource(event.target.value)}>
+                  <option value="">Tutte</option>
+                  {filterOptions.sources.map((source) => <option key={source} value={source}>{source}</option>)}
+                </select>
+              </label>
+            </div>
             <div className="controls-row">
               <label className="range-control">
                 <span>Profondita ricerca</span>
@@ -931,7 +1049,7 @@ function App() {
                       <p>{hit.excerpt}</p>
                       <footer>
                         <span>{hit.created || "data n/d"}</span>
-                        <span>{hit.poster || "autore n/d"}</span>
+                        <span>{[hit.department_name, hit.ticket_source].filter(Boolean).join(" - ") || "classificazione n/d"}</span>
                       </footer>
                     </article>
                   ))}
@@ -963,6 +1081,38 @@ function App() {
                   <option value={30}>Ultimi 30 giorni</option>
                   <option value={90}>Ultimi 90 giorni</option>
                   <option value={180}>Ultimi 180 giorni</option>
+                </select>
+              </label>
+              <label className="select-control">
+                <Building2 size={18} />
+                <span>Reparto</span>
+                <select
+                  value={analysisDepartmentId ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value ? Number(event.target.value) : null;
+                    setAnalysisDepartmentId(value);
+                    loadAnalysis(days, true, value, analysisSource);
+                  }}
+                >
+                  <option value="">Tutti</option>
+                  {filterOptions.departments.map((department) => (
+                    <option key={department.id} value={department.id}>{department.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="select-control">
+                <Filter size={18} />
+                <span>Fonte</span>
+                <select
+                  value={analysisSource}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setAnalysisSource(value);
+                    loadAnalysis(days, true, analysisDepartmentId, value);
+                  }}
+                >
+                  <option value="">Tutte</option>
+                  {filterOptions.sources.map((source) => <option key={source} value={source}>{source}</option>)}
                 </select>
               </label>
               {analysis?.generated_at ? <span className="soft-chip">DB: {analysis.generated_at}</span> : <span className="soft-chip">DB condiviso</span>}
@@ -1219,7 +1369,7 @@ function App() {
               <MessageSquareText size={19} />
               <div>
                 <h2>Query ticket</h2>
-                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, ticket_id, ticket_number.</p>
+                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, ticket_id, ticket_number, department_id, department_name, ticket_source.</p>
               </div>
             </div>
             <textarea
@@ -1307,6 +1457,16 @@ function App() {
                   </select>
                 </label>
               </div>
+              {newUser.role === "user" ? (
+                <DepartmentPermissions
+                  allDepartments={newUser.all_departments}
+                  departments={filterOptions.departments}
+                  selectedIds={newUser.department_ids}
+                  onChange={(allDepartments, departmentIds) =>
+                    setNewUser((current) => ({ ...current, all_departments: allDepartments, department_ids: departmentIds }))
+                  }
+                />
+              ) : null}
               <div className="controls-row">
                 <button className="primary-button" type="submit">
                   <UserPlus size={18} />
@@ -1323,11 +1483,23 @@ function App() {
               <div className="user-list">
                 {users.map((user) => (
                   <article className="user-row" key={user.id}>
-                    <div>
+                    <div className="user-identity">
                       <strong>{user.username}</strong>
                       <span>{user.created_at || "creato"}</span>
                     </div>
                     <span className={`soft-chip role-${user.role}`}>{user.role}</span>
+                    {user.role === "user" ? (
+                      <DepartmentPermissions
+                        allDepartments={user.all_departments}
+                        departments={filterOptions.departments}
+                        selectedIds={user.department_ids}
+                        onChange={(allDepartments, departmentIds) =>
+                          updateUserPermissions(user, allDepartments, departmentIds)
+                        }
+                      />
+                    ) : (
+                      <span className="permission-summary">Tutti i reparti</span>
+                    )}
                   </article>
                 ))}
               </div>
@@ -1391,6 +1563,53 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
         </button>
       </form>
     </main>
+  );
+}
+
+function DepartmentPermissions({
+  allDepartments,
+  departments,
+  selectedIds,
+  onChange
+}: {
+  allDepartments: boolean;
+  departments: Array<{ id: number; name: string }>;
+  selectedIds: number[];
+  onChange: (allDepartments: boolean, departmentIds: number[]) => void;
+}) {
+  function toggleDepartment(departmentId: number) {
+    const next = selectedIds.includes(departmentId)
+      ? selectedIds.filter((value) => value !== departmentId)
+      : [...selectedIds, departmentId];
+    onChange(false, next.sort((left, right) => left - right));
+  }
+
+  return (
+    <fieldset className="department-permissions">
+      <legend>Reparti visibili</legend>
+      <label className="checkbox-option all-departments-option">
+        <input
+          type="checkbox"
+          checked={allDepartments}
+          onChange={(event) => onChange(event.target.checked, event.target.checked ? [] : selectedIds)}
+        />
+        <span>Tutti</span>
+      </label>
+      {!allDepartments ? (
+        <div className="department-checklist">
+          {departments.map((department) => (
+            <label className="checkbox-option" key={department.id}>
+              <input
+                type="checkbox"
+                checked={selectedIds.includes(department.id)}
+                onChange={() => toggleDepartment(department.id)}
+              />
+              <span>{department.name}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </fieldset>
   );
 }
 
@@ -1483,7 +1702,9 @@ function ProblemGroupCard({
                 ) : (
                   <strong>#{ticket.ticket_number || ticket.id}</strong>
                 )}
-                <span>{ticket.created || "data n/d"}</span>
+                <span>
+                  {[ticket.department_name, ticket.ticket_source, ticket.created || "data n/d"].filter(Boolean).join(" - ")}
+                </span>
               </div>
               <h4>{ticket.title}</h4>
               <p>{ticket.excerpt}</p>

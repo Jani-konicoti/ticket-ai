@@ -360,6 +360,13 @@ textarea:focus {
   margin-top: 12px;
 }
 
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
 .range-control,
 .select-control,
 .toolbar-actions {
@@ -1063,14 +1070,68 @@ textarea:focus {
 }
 
 .user-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto;
+  align-items: start;
   gap: 12px;
   padding: 12px;
   background: #fbfdff;
   border: 1px solid #dfe7ef;
   border-radius: 10px;
+}
+
+.user-identity {
+  min-width: 0;
+}
+
+.department-permissions {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 14px 0 0;
+  padding: 12px;
+  border: 1px solid #dfe7ef;
+  border-radius: 8px;
+}
+
+.department-permissions legend {
+  padding: 0 6px;
+  color: #415066;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.department-checklist {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+  max-height: 220px;
+  margin-top: 10px;
+  overflow-y: auto;
+}
+
+.checkbox-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: #344258;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.checkbox-option input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  accent-color: #d61f2a;
+}
+
+.checkbox-option span {
+  overflow-wrap: anywhere;
+}
+
+.permission-summary {
+  grid-column: 1 / -1;
+  font-weight: 750;
 }
 
 .user-row strong {

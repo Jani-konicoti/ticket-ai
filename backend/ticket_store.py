@@ -241,7 +241,7 @@ class TicketStore:
         missing = expected - set(df.columns)
         if missing:
             raise ValueError(f"Colonne mancanti nel CSV: {', '.join(sorted(missing))}")
-        for optional_column in ("ticket_id", "ticket_number"):
+        for optional_column in ("ticket_id", "ticket_number", "department_id", "department_name", "ticket_source"):
             if optional_column not in df.columns:
                 df[optional_column] = None
         df["created_dt"] = pd.to_datetime(df["created"], errors="coerce")
@@ -260,7 +260,31 @@ class TicketStore:
             ids_path=self.ids_path,
         )
 
-    def search(self, query_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
+    def available_filters(self, allowed_department_ids: set[int] | None = None) -> dict[str, list[dict[str, Any]] | list[str]]:
+        rows = self._filtered_tickets(allowed_department_ids, None)
+        departments: dict[int, str] = {}
+        for _, row in rows.iterrows():
+            department_id = self._int_value(row.get("department_id"))
+            if department_id is None:
+                continue
+            name = _clean_text(row.get("department_name")) or f"Reparto {department_id}"
+            departments[department_id] = name
+        sources = sorted({_clean_text(value) for value in rows["ticket_source"].tolist() if _clean_text(value)}, key=str.casefold)
+        return {
+            "departments": [
+                {"id": department_id, "name": name}
+                for department_id, name in sorted(departments.items(), key=lambda item: (item[1].casefold(), item[0]))
+            ],
+            "sources": sources,
+        }
+
+    def search(
+        self,
+        query_embedding: list[float],
+        top_k: int = 8,
+        department_ids: set[int] | None = None,
+        ticket_source: str | None = None,
+    ) -> list[dict[str, Any]]:
         vector = np.array([query_embedding], dtype="float32")
         if vector.shape[1] != self.dimension:
             raise ValueError(
@@ -275,7 +299,7 @@ class TicketStore:
         candidates: list[tuple[float, int]] = []
         offset = 0
         for index in self.indexes:
-            search_k = min(int(index.ntotal), top_k)
+            search_k = min(int(index.ntotal), max(top_k * 100, 1000))
             if search_k:
                 distances, positions = index.search(vector, search_k)
                 candidates.extend(
@@ -294,6 +318,8 @@ class TicketStore:
             row = self._row_for_position(ticket_id, position)
             if row is None:
                 continue
+            if not self._matches_filters(row, department_ids, ticket_source):
+                continue
             body = _clean_text(row.get("clean_body"))
             title = _clean_text(row.get("title")) or "Senza titolo"
             source_ticket_id = self._json_value(row.get("ticket_id"))
@@ -307,6 +333,9 @@ class TicketStore:
                     "ticket_id": source_ticket_id,
                     "ticket_number": ticket_number,
                     "ticket_url": self._ticket_url(source_ticket_id),
+                    "department_id": self._json_value(row.get("department_id")),
+                    "department_name": _clean_text(row.get("department_name")) or None,
+                    "ticket_source": _clean_text(row.get("ticket_source")) or None,
                     "title": title,
                     "created": self._json_value(row.get("created")),
                     "poster": self._json_value(row.get("poster")),
@@ -334,14 +363,21 @@ class TicketStore:
             return row
         return None
 
-    def recent_problem_groups(self, days: int = 30, limit: int = 12) -> tuple[pd.DataFrame, list[dict[str, Any]], str | None]:
-        latest_date = self.tickets["created_dt"].max()
+    def recent_problem_groups(
+        self,
+        days: int = 30,
+        limit: int = 12,
+        department_ids: set[int] | None = None,
+        ticket_source: str | None = None,
+    ) -> tuple[pd.DataFrame, list[dict[str, Any]], str | None]:
+        filtered_tickets = self._filtered_tickets(department_ids, ticket_source)
+        latest_date = filtered_tickets["created_dt"].max()
         if pd.isna(latest_date):
-            recent_rows = self.tickets.copy()
+            recent_rows = filtered_tickets.copy()
             since = None
         else:
             since_dt = latest_date - pd.Timedelta(days=days)
-            recent_rows = self.tickets[self.tickets["created_dt"] >= since_dt].copy()
+            recent_rows = filtered_tickets[filtered_tickets["created_dt"] >= since_dt].copy()
             since = since_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         recent = recent_rows.sort_values("created_dt", ascending=False).drop_duplicates("id", keep="first").copy()
@@ -375,6 +411,9 @@ class TicketStore:
                         "ticket_id": source_ticket_id,
                         "ticket_number": self._json_value(row.get("ticket_number")),
                         "ticket_url": self._ticket_url(source_ticket_id),
+                        "department_id": self._json_value(row.get("department_id")),
+                        "department_name": _clean_text(row.get("department_name")) or None,
+                        "ticket_source": _clean_text(row.get("ticket_source")) or None,
                         "created": self._json_value(row.get("created")),
                         "title": _clean_text(row.get("title")) or "Senza titolo",
                         "poster": self._json_value(row.get("poster")),
@@ -414,8 +453,16 @@ class TicketStore:
         )
         return recent, grouped[:limit], since
 
-    def recent_sample_for_prompt(self, days: int = 30, limit: int = 80) -> list[dict[str, Any]]:
-        recent, _, _ = self.recent_problem_groups(days=days, limit=limit)
+    def recent_sample_for_prompt(
+        self,
+        days: int = 30,
+        limit: int = 80,
+        department_ids: set[int] | None = None,
+        ticket_source: str | None = None,
+    ) -> list[dict[str, Any]]:
+        recent, _, _ = self.recent_problem_groups(
+            days=days, limit=limit, department_ids=department_ids, ticket_source=ticket_source
+        )
         recent = recent.sort_values("created_dt", ascending=False).head(limit)
         sample = []
         for _, row in recent.iterrows():
@@ -423,12 +470,44 @@ class TicketStore:
                 {
                     "id": self._json_value(row.get("ticket_number")) or self._json_value(row.get("ticket_id")) or self._json_value(row.get("id")),
                     "ticket_number": self._json_value(row.get("ticket_number")),
+                    "department_name": _clean_text(row.get("department_name")) or None,
+                    "ticket_source": _clean_text(row.get("ticket_source")) or None,
                     "created": self._json_value(row.get("created")),
                     "title": _clean_text(row.get("title")),
                     "body": _excerpt(_clean_text(row.get("clean_body")), 350),
                 }
             )
         return sample
+
+    def _filtered_tickets(self, department_ids: set[int] | None, ticket_source: str | None) -> pd.DataFrame:
+        rows = self.tickets
+        if department_ids is not None:
+            if not department_ids:
+                return rows.iloc[0:0].copy()
+            numeric_departments = pd.to_numeric(rows["department_id"], errors="coerce")
+            rows = rows[numeric_departments.isin(department_ids)]
+        normalized_source = _clean_text(ticket_source)
+        if normalized_source:
+            rows = rows[rows["ticket_source"].map(_clean_text).str.casefold() == normalized_source.casefold()]
+        return rows
+
+    @classmethod
+    def _matches_filters(
+        cls, row: pd.Series, department_ids: set[int] | None, ticket_source: str | None
+    ) -> bool:
+        if department_ids is not None and cls._int_value(row.get("department_id")) not in department_ids:
+            return False
+        normalized_source = _clean_text(ticket_source)
+        return not normalized_source or _clean_text(row.get("ticket_source")).casefold() == normalized_source.casefold()
+
+    @staticmethod
+    def _int_value(value: Any) -> int | None:
+        if value is None or pd.isna(value):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _ticket_url(self, ticket_id: Any) -> str | None:
         value = self._json_value(ticket_id)

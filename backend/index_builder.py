@@ -42,6 +42,9 @@ CSV_COLUMNS = [
     "thread_id",
     "ticket_id",
     "ticket_number",
+    "department_id",
+    "department_name",
+    "ticket_source",
     "staff_id",
     "user_id",
     "poster",
@@ -98,7 +101,7 @@ WHERE e.type IN ('M', 'R', 'N')
     )
   )
 """.strip()
-DEFAULT_QUERY = """
+CONVERSATION_DEFAULT_QUERY_V2 = """
 SELECT
   e.id,
   e.thread_id,
@@ -119,6 +122,47 @@ JOIN ost_ticket t
   ON t.ticket_id = th.object_id
 LEFT JOIN ost_ticket__cdata tc
   ON tc.ticket_id = t.ticket_id
+WHERE e.type IN ('M', 'R', 'N')
+  AND LENGTH(e.body) > 20
+  AND (
+    e.type <> 'N'
+    OR e.title IS NULL
+    OR (
+      e.title <> 'Stato modificato'
+      AND e.title <> 'Nuovo collaboratore aggiunto'
+      AND e.title <> 'Ticket aggiornato'
+      AND e.title NOT LIKE '%Nuovo ticket da%'
+      AND e.title NOT LIKE '%Ticket assegnato a%'
+      AND e.title NOT LIKE '%Ticket trasferito da%'
+    )
+  )
+""".strip()
+DEFAULT_QUERY = """
+SELECT
+  e.id,
+  e.thread_id,
+  e.staff_id,
+  e.user_id,
+  e.poster,
+  e.created,
+  COALESCE(NULLIF(tc.subject, ''), NULLIF(e.title, ''), CONCAT('Ticket ', t.number)) AS title,
+  e.body,
+  e.type AS entry_type,
+  t.ticket_id,
+  t.number AS ticket_number,
+  t.dept_id AS department_id,
+  d.name AS department_name,
+  t.source AS ticket_source
+FROM ost_thread_entry e
+JOIN ost_thread th
+  ON th.id = e.thread_id
+ AND th.object_type = 'T'
+JOIN ost_ticket t
+  ON t.ticket_id = th.object_id
+LEFT JOIN ost_ticket__cdata tc
+  ON tc.ticket_id = t.ticket_id
+LEFT JOIN ost_department d
+  ON d.id = t.dept_id
 WHERE e.type IN ('M', 'R', 'N')
   AND LENGTH(e.body) > 20
   AND (
@@ -282,6 +326,7 @@ class ConfigStore:
         elif _normalized_query(data["query"]) in {
             _normalized_query(LEGACY_DEFAULT_QUERY),
             _normalized_query(CONVERSATION_DEFAULT_QUERY_V1),
+            _normalized_query(CONVERSATION_DEFAULT_QUERY_V2),
         }:
             data["query"] = DEFAULT_QUERY
             config = DatabaseConfig(**data)
@@ -557,6 +602,15 @@ class VectorIndexBuilder:
         if missing:
             raise RuntimeError(f"Nessuna build parziale riprendibile in {build_dir}: mancano {', '.join(missing)}.")
 
+        csv_path = build_dir / "ticket_data.csv"
+        csv_columns = pd.read_csv(csv_path, sep=";", encoding="utf-8", nrows=0).columns.tolist()
+        missing_columns = [column for column in CSV_COLUMNS if column not in csv_columns]
+        if missing_columns:
+            raise RuntimeError(
+                "La build parziale usa metadati precedenti e non puo' essere ripresa: "
+                f"mancano {', '.join(missing_columns)}. Avvia Rifai FAISS da zero."
+            )
+
         index_paths = [build_dir / "ticket_index.faiss", *sorted(build_dir.glob("ticket_index.append-*.faiss"))]
         vector_count = sum(int(faiss.read_index(str(path)).ntotal) for path in index_paths)
         ids_count = sum(1 for line in (build_dir / "ticket_ids.txt").read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip())
@@ -728,6 +782,9 @@ class VectorIndexBuilder:
                         "thread_id": last["thread_id"],
                         "ticket_id": last["ticket_id"],
                         "ticket_number": last["ticket_number"],
+                        "department_id": last["department_id"],
+                        "department_name": last["department_name"],
+                        "ticket_source": last["ticket_source"],
                         "staff_id": last["staff_id"],
                         "user_id": last["user_id"],
                         "poster": "Conversazione",
@@ -765,20 +822,26 @@ class VectorIndexBuilder:
 
     @staticmethod
     def _source_row(row: Any) -> dict[str, Any]:
-        if len(row) < 11:
+        if len(row) < 14:
             raise RuntimeError(
                 "La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, "
-                "entry_type, ticket_id, ticket_number."
+                "entry_type, ticket_id, ticket_number, department_id, department_name, ticket_source."
             )
         id_, thread_id, staff_id, user_id, poster, created, title, body = row[:8]
         entry_type = str(row[8] or "")
         ticket_id = row[9]
         ticket_number = row[10]
+        department_id = row[11]
+        department_name = row[12]
+        ticket_source = row[13]
         return {
             "id": id_,
             "thread_id": thread_id,
             "ticket_id": ticket_id,
             "ticket_number": ticket_number,
+            "department_id": department_id,
+            "department_name": str(department_name or "Senza reparto").strip(),
+            "ticket_source": str(ticket_source or "Altro").strip(),
             "staff_id": staff_id,
             "user_id": user_id,
             "poster": str(poster or "Sconosciuto").strip(),

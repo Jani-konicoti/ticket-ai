@@ -26,6 +26,7 @@ from .models import (
     RebuildRequest,
     SaveConfigRequest,
     TicketHit,
+    UpdateUserDepartmentsRequest,
     UserResponse,
 )
 from .openai_service import OpenAIService
@@ -116,15 +117,28 @@ app.add_middleware(
 )
 
 
-def _build_recent_problems_payload(days: int, limit: int = 24) -> RecentProblemsResponse:
+def _build_recent_problems_payload(
+    days: int,
+    limit: int = 24,
+    department_ids: set[int] | None = None,
+    ticket_source: str | None = None,
+    include_ai: bool = True,
+) -> RecentProblemsResponse:
     store = get_store()
-    recent, groups, since = store.recent_problem_groups(days=days, limit=limit)
+    recent, groups, since = store.recent_problem_groups(
+        days=days, limit=limit, department_ids=department_ids, ticket_source=ticket_source
+    )
     ai_summary = None
     ai_error = None
     openai_service = get_openai_service()
-    if openai_service.configured():
+    if include_ai and openai_service.configured():
         try:
-            ai_summary = openai_service.summarize_recent_problems(store.recent_sample_for_prompt(days=days), groups)
+            ai_summary = openai_service.summarize_recent_problems(
+                store.recent_sample_for_prompt(
+                    days=days, department_ids=department_ids, ticket_source=ticket_source
+                ),
+                groups,
+            )
         except Exception as exc:
             ai_error = str(exc)
             logger.exception("AI summary failed for recent problems, %s days", days)
@@ -141,7 +155,19 @@ def _build_recent_problems_payload(days: int, limit: int = 24) -> RecentProblems
         ai_summary=ai_summary,
         ai_error=ai_error,
         vector_count=store.stats.vectors,
+        generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
+
+
+def _departments_for_user(user: CurrentUser, requested_department_id: int | None = None) -> set[int] | None:
+    if user.all_departments:
+        return {requested_department_id} if requested_department_id is not None else None
+    allowed = set(user.department_ids)
+    if requested_department_id is not None:
+        if requested_department_id not in allowed:
+            raise HTTPException(status_code=403, detail="Non sei autorizzato a consultare questo reparto.")
+        return {requested_department_id}
+    return allowed
 
 
 def _refresh_recent_problem_cache(periods: tuple[int, ...], job: JobState, source: str) -> None:
@@ -231,7 +257,10 @@ def login(payload: LoginRequest) -> AuthResponse:
     token = get_auth_store().create_session(user.id)
     return AuthResponse(
         token=token,
-        user=UserResponse(id=user.id, username=user.username, role=user.role, active=True, created_at=None),
+        user=UserResponse(
+            id=user.id, username=user.username, role=user.role, active=True, created_at=None,
+            all_departments=user.all_departments, department_ids=list(user.department_ids)
+        ),
     )
 
 
@@ -243,6 +272,8 @@ def me(current_user: CurrentUser = Depends(require_user)) -> UserResponse:
         role=current_user.role,
         active=True,
         created_at=None,
+        all_departments=current_user.all_departments,
+        department_ids=list(current_user.department_ids),
     )
 
 
@@ -262,10 +293,32 @@ def list_users(_: CurrentUser = Depends(require_admin)) -> list[UserResponse]:
 @app.post("/api/users", response_model=UserResponse)
 def create_user(payload: CreateUserRequest, _: CurrentUser = Depends(require_admin)) -> UserResponse:
     try:
-        user = get_auth_store().create_user(payload.username, payload.password, payload.role)  # type: ignore[arg-type]
+        user = get_auth_store().create_user(
+            payload.username, payload.password, payload.role, payload.all_departments, payload.department_ids
+        )  # type: ignore[arg-type]
         return UserResponse(**user)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/users/{user_id}/departments", response_model=UserResponse)
+def update_user_departments(
+    user_id: int, payload: UpdateUserDepartmentsRequest, _: CurrentUser = Depends(require_admin)
+) -> UserResponse:
+    try:
+        return UserResponse(
+            **get_auth_store().update_departments(user_id, payload.all_departments, payload.department_ids)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/filters")
+def available_filters(current_user: CurrentUser = Depends(require_user)) -> dict[str, object]:
+    try:
+        return get_store().available_filters(_departments_for_user(current_user))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=f"Indice FAISS non ancora creato: {exc}") from exc
 
 
 @app.get("/api/health")
@@ -457,7 +510,7 @@ def get_analysis_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> Jo
 
 
 @app.post("/api/ask", response_model=AskResponse)
-def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskResponse:
+def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) -> AskResponse:
     try:
         if job_manager.active():
             raise HTTPException(status_code=503, detail="Indice FAISS in aggiornamento. Riprova al termine del job.")
@@ -465,7 +518,12 @@ def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskRespo
         openai_service = get_openai_service()
         embedding_model = openai_service.resolve_embedding_model(store.stats.dimension)
         embedding = openai_service.embed(payload.question, embedding_model)
-        raw_hits = store.search(embedding, top_k=payload.top_k)
+        raw_hits = store.search(
+            embedding,
+            top_k=payload.top_k,
+            department_ids=_departments_for_user(current_user, payload.department_id),
+            ticket_source=payload.ticket_source,
+        )
         if payload.min_score is not None:
             raw_hits = [hit for hit in raw_hits if hit["score"] >= payload.min_score]
         hits = [TicketHit(**hit) for hit in raw_hits]
@@ -496,17 +554,24 @@ def recent_problems(
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=12, ge=1, le=50),
     include_ai: bool = Query(default=True),
-    _: CurrentUser = Depends(require_user),
+    department_id: int | None = Query(default=None),
+    ticket_source: str | None = Query(default=None),
+    current_user: CurrentUser = Depends(require_user),
 ) -> RecentProblemsResponse:
     try:
         if days not in ANALYSIS_PERIODS:
             raise HTTPException(status_code=400, detail="Periodo non supportato. Usa 7, 30, 90 o 180 giorni.")
-        cached = get_analysis_cache_store().get(days)
+        department_ids = _departments_for_user(current_user, department_id)
+        is_global_request = department_ids is None and not ticket_source
+        cached = get_analysis_cache_store().get(days) if is_global_request else None
         if not cached:
-            raise HTTPException(
-                status_code=409,
-                detail="Analisi non ancora generata. Un admin puo' avviare Rigenera analisi problemi noti.",
-            )
+            cached = _build_recent_problems_payload(
+                days=days,
+                limit=limit,
+                department_ids=department_ids,
+                ticket_source=ticket_source,
+                include_ai=include_ai,
+            ).model_dump()
         if limit and len(cached.get("groups", [])) > limit:
             cached["groups"] = cached["groups"][:limit]
         if not include_ai:

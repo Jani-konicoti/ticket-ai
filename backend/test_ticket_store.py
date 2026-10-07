@@ -13,6 +13,7 @@ from backend.index_builder import (
     CSV_COLUMNS,
     DEFAULT_QUERY,
     CONVERSATION_DEFAULT_QUERY_V1,
+    CONVERSATION_DEFAULT_QUERY_V2,
     LEGACY_DEFAULT_QUERY,
     ConfigStore,
     JobState,
@@ -20,6 +21,7 @@ from backend.index_builder import (
     clean_body,
 )
 from backend.models import DatabaseConfig
+from backend.auth import AuthStore
 from backend.ticket_store import TicketStore
 
 
@@ -178,11 +180,22 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertIn("t.ticket_id", migrated.query)
             self.assertIn("t.number AS ticket_number", migrated.query)
 
+    def test_conversation_v2_query_is_migrated_with_department_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ConfigStore(Path(temp_dir) / "config.sqlite")
+            store.save_config(DatabaseConfig(query=CONVERSATION_DEFAULT_QUERY_V2))
+
+            migrated = store.get_config()
+
+            self.assertEqual(migrated.query, DEFAULT_QUERY)
+            self.assertIn("d.name AS department_name", migrated.query)
+            self.assertIn("t.source AS ticket_source", migrated.query)
+
     def test_cursor_groups_ordered_entries_by_thread(self) -> None:
         rows = [
-            (1, 10, 0, 5, "Cliente", "2026-10-01 10:00:00", "Titolo A", "<p>Domanda del cliente abbastanza lunga.</p>", "M", 101, 1001),
-            (2, 10, 7, 0, "Tecnico", "2026-10-01 11:00:00", "Titolo A", "<p>Risposta risolutiva del tecnico.</p>", "R", 101, 1001),
-            (3, 20, 0, 6, "Altro cliente", "2026-10-02 10:00:00", "Titolo B", "<p>Seconda conversazione indipendente.</p>", "M", 202, 2002),
+            (1, 10, 0, 5, "Cliente", "2026-10-01 10:00:00", "Titolo A", "<p>Domanda del cliente abbastanza lunga.</p>", "M", 101, 1001, 8, "Paghe", "Email"),
+            (2, 10, 7, 0, "Tecnico", "2026-10-01 11:00:00", "Titolo A", "<p>Risposta risolutiva del tecnico.</p>", "R", 101, 1001, 8, "Paghe", "Email"),
+            (3, 20, 0, 6, "Altro cliente", "2026-10-02 10:00:00", "Titolo B", "<p>Seconda conversazione indipendente.</p>", "M", 202, 2002, 3, "Fiscale", "Web"),
         ]
 
         class FakeCursor:
@@ -237,6 +250,37 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertNotIn("Seconda conversazione", metadata.iloc[0]["clean_body"])
             self.assertEqual(metadata.iloc[0]["ticket_id"], 101)
             self.assertEqual(metadata.iloc[0]["ticket_number"], 1001)
+            self.assertEqual(metadata.iloc[0]["department_name"], "Paghe")
+            self.assertEqual(metadata.iloc[0]["ticket_source"], "Email")
+
+    def test_department_filter_and_permissions_exclude_other_tickets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            faiss_dir = Path(temp_dir)
+            self._write_index(faiss_dir / "ticket_index.faiss", [[1.0, 1.0], [1.1, 1.1]])
+            (faiss_dir / "ticket_ids.txt").write_text("1\n2\n", encoding="utf-8")
+            self._write_metadata(faiss_dir / "ticket_data.csv", ticket_ids=(1, 2))
+            metadata = pd.read_csv(faiss_dir / "ticket_data.csv", sep=";")
+            metadata.loc[0, ["department_id", "department_name", "ticket_source"]] = [20, "Zeta", "Email"]
+            metadata.loc[1, ["department_id", "department_name", "ticket_source"]] = [10, "Alfa", "Web"]
+            metadata.to_csv(faiss_dir / "ticket_data.csv", sep=";", index=False)
+
+            store = TicketStore(faiss_dir)
+            hits = store.search([1.0, 1.0], top_k=10, department_ids={10})
+            options = store.available_filters({10, 20})
+
+            self.assertEqual([hit["department_id"] for hit in hits], [10])
+            self.assertEqual([item["name"] for item in options["departments"]], ["Alfa", "Zeta"])
+
+    def test_user_department_permissions_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AuthStore(Path(temp_dir) / "auth.sqlite")
+            user = store.create_user("operatore", "segreta", "user", False, [8, 3])
+            authenticated = store.authenticate("operatore", "segreta")
+
+            self.assertFalse(user["all_departments"])
+            self.assertEqual(user["department_ids"], [3, 8])
+            self.assertIsNotNone(authenticated)
+            self.assertEqual(authenticated.department_ids, (3, 8))  # type: ignore[union-attr]
 
     @staticmethod
     def _write_index(path: Path, vectors: list[list[float]]) -> None:
@@ -256,6 +300,9 @@ class TicketStoreShardTests(unittest.TestCase):
                         ticket_id,
                         ticket_id,
                         ticket_id,
+                        ticket_id,
+                        f"Reparto {ticket_id}",
+                        "Email",
                         "",
                         "",
                         "test",
