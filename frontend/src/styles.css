@@ -536,6 +536,145 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.answer-markdown {
+  margin-top: 12px;
+  color: #263244;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.answer-markdown > :first-child {
+  margin-top: 0;
+}
+
+.answer-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.answer-markdown p {
+  margin: 0 0 12px;
+}
+
+.answer-markdown h1,
+.answer-markdown h2,
+.answer-markdown h3,
+.answer-markdown h4 {
+  margin: 20px 0 8px;
+  color: #172033;
+  letter-spacing: 0;
+  line-height: 1.3;
+}
+
+.answer-markdown h1 {
+  font-size: 1.25rem;
+}
+
+.answer-markdown h2 {
+  font-size: 1.13rem;
+}
+
+.answer-markdown h3,
+.answer-markdown h4 {
+  font-size: 1rem;
+}
+
+.answer-markdown ul,
+.answer-markdown ol {
+  margin: 8px 0 14px;
+  padding-left: 24px;
+}
+
+.answer-markdown li {
+  margin: 5px 0;
+  padding-left: 3px;
+}
+
+.answer-markdown li::marker {
+  color: #d61f2a;
+  font-weight: 800;
+}
+
+.answer-markdown li > p {
+  margin: 0;
+}
+
+.answer-markdown strong {
+  color: #172033;
+  font-weight: 850;
+}
+
+.answer-markdown a {
+  color: #b51620;
+  font-weight: 750;
+  text-underline-offset: 2px;
+}
+
+.answer-markdown blockquote {
+  margin: 14px 0;
+  padding: 10px 14px;
+  color: #465367;
+  border-left: 3px solid #287f78;
+  background: #f2f8f7;
+}
+
+.answer-markdown blockquote p {
+  margin: 0;
+}
+
+.answer-markdown code {
+  padding: 2px 5px;
+  border: 1px solid #dce4ee;
+  border-radius: 4px;
+  color: #8f1720;
+  background: #f6f8fa;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.answer-markdown pre {
+  max-width: 100%;
+  margin: 12px 0;
+  padding: 12px;
+  overflow-x: auto;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  background: #172033;
+}
+
+.answer-markdown pre code {
+  padding: 0;
+  color: #f8fafc;
+  border: 0;
+  background: transparent;
+}
+
+.answer-markdown table {
+  display: block;
+  width: 100%;
+  margin: 12px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.answer-markdown th,
+.answer-markdown td {
+  padding: 8px 10px;
+  border: 1px solid #dce4ee;
+  text-align: left;
+  vertical-align: top;
+}
+
+.answer-markdown th {
+  color: #172033;
+  background: #f1f5f9;
+}
+
+.answer-markdown hr {
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px solid #dce4ee;
+}
+
 .summary-panel {
   animation: slideUp 360ms ease both;
 }

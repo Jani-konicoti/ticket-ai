@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity,
   AlertCircle,
@@ -339,6 +341,25 @@ function SummaryMarkdown({ text }: { text: string }) {
   );
 }
 
+function AnswerMarkdown({ text }: { text: string }) {
+  return (
+    <div className="answer-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ children, href, title }) => (
+            <a href={href} title={title} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          )
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(() => readJson<Session | null>(SESSION_KEY, null));
   const [authChecking, setAuthChecking] = useState(Boolean(readJson<Session | null>(SESSION_KEY, null)));
@@ -656,7 +677,10 @@ function App() {
             : `Il server ha risposto ${response.status}: ${response.statusText || "errore proxy"}`
         );
       }
-      if (!response.ok) throw new Error(payload.detail || "Errore durante l'analisi");
+      if (!response.ok) {
+        const detail = "detail" in payload ? payload.detail : undefined;
+        throw new Error(detail || "Errore durante l'analisi");
+      }
       setAnalysis(payload as RecentProblemsResponse);
     } catch (error) {
       setAnalysisError(error instanceof Error ? error.message : String(error));
@@ -1218,7 +1242,7 @@ function App() {
                     <MessageSquareText size={19} />
                     <h2>{answer.merged ? "Risposta unificata" : "Risposta dai ticket"}</h2>
                   </div>
-                  <p className="answer-text">{answer.ticket_answer || answer.answer}</p>
+                  <AnswerMarkdown text={answer.ticket_answer || answer.answer} />
                   {answer.merged && (answer.manual_hits || []).length ? (
                     <ManualEvidence
                       hits={answer.manual_hits}
@@ -1236,7 +1260,7 @@ function App() {
                       <BookOpen size={19} />
                       <h2>Risposta dai manuali</h2>
                     </div>
-                    <p className="answer-text">{answer.manual_answer}</p>
+                    <AnswerMarkdown text={answer.manual_answer} />
                     <ManualEvidence
                       hits={answer.manual_hits || []}
                       session={session}
