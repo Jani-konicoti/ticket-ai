@@ -6,6 +6,7 @@ import threading
 import time
 from datetime import datetime
 from functools import lru_cache
+from typing import Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -177,6 +178,12 @@ def _append_index_until_today(job: JobState, source: str) -> None:
     get_analysis_cache_store().set_state(f"index_append_last_{source}", datetime.now().date().isoformat())
 
 
+def _run_exclusive_index_job(job: JobState, operation: Callable[[JobState], None]) -> None:
+    get_store.cache_clear()
+    gc.collect()
+    operation(job)
+
+
 def _scheduled_jobs_loop() -> None:
     while True:
         try:
@@ -186,11 +193,11 @@ def _scheduled_jobs_loop() -> None:
             cache = get_analysis_cache_store()
 
             if now.hour == settings.index_append_schedule_hour and cache.get_state("index_append_last_nightly") != today:
-                if not job_manager.active():
+                if not job_manager.active() and not analysis_job_manager.active():
                     cache.set_state("index_append_last_nightly", today)
                     job_manager.start("append_nightly", lambda state: _append_index_until_today(state, "nightly"))
                 else:
-                    logger.info("Nightly append skipped: another index job is already active.")
+                    logger.info("Nightly append skipped: another background job is already active.")
 
             if now.hour >= settings.analysis_schedule_hour and cache.get_state("analysis_last_nightly") != today:
                 if job_manager.active():
@@ -360,11 +367,14 @@ def latest_ticket_date(_: CurrentUser = Depends(require_admin)) -> dict[str, obj
 @app.post("/api/index/rebuild", response_model=JobResponse)
 def rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
+        if analysis_job_manager.active():
+            raise RuntimeError("Analisi problemi noti in corso: attendi il completamento prima di aggiornare FAISS.")
         config = get_config_store().get_config()
         builder = get_builder()
-        get_store.cache_clear()
-        gc.collect()
-        job = job_manager.start("rebuild", lambda state: builder.rebuild(config, payload.from_date, state))
+        job = job_manager.start(
+            "rebuild",
+            lambda state: _run_exclusive_index_job(state, lambda current: builder.rebuild(config, payload.from_date, current)),
+        )
         return JobResponse(**job.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -373,11 +383,16 @@ def rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(require_admi
 @app.post("/api/index/rebuild/resume", response_model=JobResponse)
 def resume_rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
+        if analysis_job_manager.active():
+            raise RuntimeError("Analisi problemi noti in corso: attendi il completamento prima di aggiornare FAISS.")
         config = get_config_store().get_config()
         builder = get_builder()
-        get_store.cache_clear()
-        gc.collect()
-        job = job_manager.start("resume_rebuild", lambda state: builder.resume_rebuild(config, payload.from_date, state))
+        job = job_manager.start(
+            "resume_rebuild",
+            lambda state: _run_exclusive_index_job(
+                state, lambda current: builder.resume_rebuild(config, payload.from_date, current)
+            ),
+        )
         return JobResponse(**job.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -386,11 +401,14 @@ def resume_rebuild_index(payload: RebuildRequest, _: CurrentUser = Depends(requi
 @app.post("/api/index/append", response_model=JobResponse)
 def append_index(_: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
+        if analysis_job_manager.active():
+            raise RuntimeError("Analisi problemi noti in corso: attendi il completamento prima di aggiornare FAISS.")
         config = get_config_store().get_config()
         builder = get_builder()
-        get_store.cache_clear()
-        gc.collect()
-        job = job_manager.start("append", lambda state: builder.append_until_today(config, state))
+        job = job_manager.start(
+            "append",
+            lambda state: _run_exclusive_index_job(state, lambda current: builder.append_until_today(config, current)),
+        )
         return JobResponse(**job.to_dict())
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -413,6 +431,8 @@ def get_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> JobResponse
 @app.post("/api/analysis/recent-problems/run", response_model=JobResponse)
 def run_recent_problems_analysis(_: CurrentUser = Depends(require_admin)) -> JobResponse:
     try:
+        if job_manager.active():
+            raise RuntimeError("Aggiornamento FAISS in corso: attendi il completamento prima di avviare l'analisi.")
         job = analysis_job_manager.start(
             "analysis_manual",
             lambda state: _refresh_recent_problem_cache(ANALYSIS_PERIODS, state, "manual"),
@@ -439,6 +459,8 @@ def get_analysis_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> Jo
 @app.post("/api/ask", response_model=AskResponse)
 def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskResponse:
     try:
+        if job_manager.active():
+            raise HTTPException(status_code=503, detail="Indice FAISS in aggiornamento. Riprova al termine del job.")
         store = get_store()
         openai_service = get_openai_service()
         embedding_model = openai_service.resolve_embedding_model(store.stats.dimension)
@@ -461,6 +483,8 @@ def ask(payload: AskRequest, _: CurrentUser = Depends(require_user)) -> AskRespo
             model=openai_service.chat_model,
             embedding_model=embedding_model,
         )
+    except HTTPException:
+        raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=f"Indice FAISS non ancora creato: {exc}") from exc
     except Exception as exc:

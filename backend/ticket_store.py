@@ -187,20 +187,32 @@ class TicketStore:
             missing_names = ", ".join(str(path) for path in missing)
             raise FileNotFoundError(f"File FAISS mancanti: {missing_names}")
 
-        self.index = faiss.read_index(str(self.index_path))
+        self.index_paths = [self.index_path, *sorted(faiss_dir.glob("ticket_index.append-*.faiss"))]
+        self.indexes = [faiss.read_index(str(path)) for path in self.index_paths]
+        self.index = self.indexes[0]
         self.ticket_ids = self._read_ticket_ids()
         self.tickets = self._read_tickets()
         self.tickets_by_id = self.tickets.set_index("id", drop=False)
         self.warnings: list[str] = []
+        self.vector_count = sum(int(index.ntotal) for index in self.indexes)
 
-        if len(self.ticket_ids) != self.index.ntotal:
+        dimensions = {int(index.d) for index in self.indexes}
+        if len(dimensions) != 1:
+            raise ValueError(f"Gli indici FAISS hanno dimensioni incompatibili: {sorted(dimensions)}")
+        metrics = {int(index.metric_type) for index in self.indexes}
+        if len(metrics) != 1:
+            raise ValueError("Gli indici FAISS usano metriche incompatibili.")
+        self.dimension = dimensions.pop()
+        self.metric_type = metrics.pop()
+
+        if len(self.ticket_ids) != self.vector_count:
             self.warnings.append(
-                f"ticket_ids.txt contiene {len(self.ticket_ids)} righe, ma l'indice FAISS ha {self.index.ntotal} vettori. "
+                f"ticket_ids.txt contiene {len(self.ticket_ids)} righe, ma gli indici FAISS hanno {self.vector_count} vettori. "
                 "I vettori senza ID verranno ignorati nei risultati."
             )
-        if len(self.tickets) != self.index.ntotal:
+        if len(self.tickets) != self.vector_count:
             self.warnings.append(
-                f"ticket_data.csv contiene {len(self.tickets)} righe, ma l'indice FAISS ha {self.index.ntotal} vettori. "
+                f"ticket_data.csv contiene {len(self.tickets)} righe, ma gli indici FAISS hanno {self.vector_count} vettori. "
                 "I vettori senza riga CSV verranno ignorati nei risultati."
             )
 
@@ -223,8 +235,8 @@ class TicketStore:
     @property
     def stats(self) -> StoreStats:
         return StoreStats(
-            vectors=self.index.ntotal,
-            dimension=self.index.d,
+            vectors=self.vector_count,
+            dimension=self.dimension,
             tickets=len(self.tickets),
             ids=len(self.ticket_ids),
             warnings=self.warnings,
@@ -235,35 +247,44 @@ class TicketStore:
 
     def search(self, query_embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
         vector = np.array([query_embedding], dtype="float32")
-        if vector.shape[1] != self.index.d:
+        if vector.shape[1] != self.dimension:
             raise ValueError(
-                f"L'embedding della domanda ha dimensione {vector.shape[1]}, ma l'indice FAISS richiede {self.index.d}. "
+                f"L'embedding della domanda ha dimensione {vector.shape[1]}, ma l'indice FAISS richiede {self.dimension}. "
                 "Verifica OPENAI_EMBEDDING_MODEL."
             )
 
-        if self.index.metric_type == faiss.METRIC_INNER_PRODUCT:
+        if self.metric_type == faiss.METRIC_INNER_PRODUCT:
             faiss.normalize_L2(vector)
 
         metadata_count = min(len(self.ticket_ids), len(self.tickets))
-        metadata_gap = max(0, self.index.ntotal - metadata_count)
-        search_k = min(self.index.ntotal, top_k + min(metadata_gap, 500))
-        distances, positions = self.index.search(vector, search_k)
+        candidates: list[tuple[float, int]] = []
+        offset = 0
+        for index in self.indexes:
+            search_k = min(int(index.ntotal), top_k)
+            if search_k:
+                distances, positions = index.search(vector, search_k)
+                candidates.extend(
+                    (float(score), offset + int(position))
+                    for score, position in zip(distances[0], positions[0])
+                    if position >= 0
+                )
+            offset += int(index.ntotal)
+
+        candidates.sort(key=lambda item: item[0], reverse=self.metric_type == faiss.METRIC_INNER_PRODUCT)
         hits: list[dict[str, Any]] = []
-        for rank, (score, position) in enumerate(zip(distances[0], positions[0]), start=1):
-            if position < 0:
+        for score, position in candidates:
+            if position >= metadata_count:
                 continue
-            if int(position) >= metadata_count:
-                continue
-            ticket_id = self.ticket_ids[int(position)]
-            row = self._row_for_position(ticket_id, int(position))
+            ticket_id = self.ticket_ids[position]
+            row = self._row_for_position(ticket_id, position)
             if row is None:
                 continue
             body = _clean_text(row.get("clean_body"))
             title = _clean_text(row.get("title")) or "Senza titolo"
             hits.append(
                 {
-                    "rank": rank,
-                    "score": float(score),
+                    "rank": len(hits) + 1,
+                    "score": score,
                     "id": self._json_value(row.get("id", ticket_id)),
                     "thread_id": self._json_value(row.get("thread_id")),
                     "title": title,

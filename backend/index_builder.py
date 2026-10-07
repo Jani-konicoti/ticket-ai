@@ -388,7 +388,13 @@ class VectorIndexBuilder:
 
         existing_ids = self._read_existing_ids()
         query = _date_filter_query(config.query, ">")
-        self._run_query_to_index(config, query, (latest,), existing_ids, job)
+        final_dir = self.faiss_dir
+        shard_path = final_dir / f"ticket_index.append-{datetime.now():%Y%m}.faiss"
+        self.index_path = shard_path
+        try:
+            self._run_query_to_index(config, query, (latest,), existing_ids, job)
+        finally:
+            self._set_output_dir(final_dir)
 
     @staticmethod
     def _prepare_build_dir(build_dir: Path, job: JobState) -> None:
@@ -663,6 +669,8 @@ class VectorIndexBuilder:
         final_dir.mkdir(parents=True, exist_ok=True)
         for name in required:
             self._replace_with_retry(build_dir / name, final_dir / name)
+        for shard_path in final_dir.glob("ticket_index.append-*.faiss"):
+            shard_path.unlink()
         job.message = "Nuovo FAISS pubblicato."
 
     @staticmethod
