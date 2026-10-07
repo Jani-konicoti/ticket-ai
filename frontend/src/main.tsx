@@ -855,7 +855,15 @@ function App() {
     body.append("department_ids", JSON.stringify(manualDepartmentIds));
     try {
       const response = await fetch("/api/manuals", { method: "POST", headers: authHeaders(session), body });
-      const payload = await response.json();
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : {
+            detail:
+              response.status === 413
+                ? "Il PDF supera il limite consentito dal proxy web. Verifica il limite di upload Nginx."
+                : (await response.text()) || `Errore HTTP ${response.status}`
+          };
       if (!response.ok) throw new Error(payload.detail || "Errore caricamento manuale");
       setManuals((current) => [...current.filter((item) => item.id !== payload.id), payload]);
       setManualFile(null);
