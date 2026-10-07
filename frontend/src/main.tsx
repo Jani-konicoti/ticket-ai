@@ -165,6 +165,8 @@ type UserResponse = {
   created_at?: string | null;
   all_departments: boolean;
   department_ids: number[];
+  auth_source: string;
+  external_staff_id?: number | null;
 };
 
 type FilterOptions = {
@@ -1488,7 +1490,7 @@ function App() {
                       <span>{user.created_at || "creato"}</span>
                     </div>
                     <span className={`soft-chip role-${user.role}`}>{user.role}</span>
-                    {user.role === "user" ? (
+                    {user.role === "user" && user.auth_source !== "osticket" ? (
                       <DepartmentPermissions
                         allDepartments={user.all_departments}
                         departments={filterOptions.departments}
@@ -1497,6 +1499,10 @@ function App() {
                           updateUserPermissions(user, allDepartments, departmentIds)
                         }
                       />
+                    ) : user.auth_source === "osticket" ? (
+                      <span className="permission-summary">
+                        osTicket #{user.external_staff_id || "-"} - reparti sincronizzati automaticamente
+                      </span>
                     ) : (
                       <span className="permission-summary">Tutti i reparti</span>
                     )}
@@ -1551,7 +1557,7 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
           <KeyRound size={20} />
           <div>
             <h2>Accesso</h2>
-            <p>Admin seed: username <strong>admin</strong>, password <strong>admin</strong>.</p>
+            <p>Usa le stesse credenziali del portale ticket.</p>
           </div>
         </div>
         <Field label="Username" value={username} onChange={setUsername} />

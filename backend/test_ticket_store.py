@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 import faiss
+import bcrypt
 import numpy as np
 import pandas as pd
 
@@ -23,6 +24,7 @@ from backend.index_builder import (
 from backend.models import DatabaseConfig
 from backend.auth import AuthStore
 from backend.ticket_store import TicketStore
+from backend.osticket_auth import OsTicketAuthenticator
 
 
 class TicketStoreShardTests(unittest.TestCase):
@@ -281,6 +283,49 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertEqual(user["department_ids"], [3, 8])
             self.assertIsNotNone(authenticated)
             self.assertEqual(authenticated.department_ids, (3, 8))  # type: ignore[union-attr]
+
+    def test_osticket_user_is_created_and_departments_are_resynced(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AuthStore(Path(temp_dir) / "auth.sqlite")
+            created = store.upsert_osticket_user("jani.konicoti", 418, False, (136, 140))
+            updated = store.upsert_osticket_user("jani.konicoti", 418, False, (136, 150))
+
+            self.assertEqual(created.auth_source, "osticket")
+            self.assertEqual(created.external_staff_id, 418)
+            self.assertEqual(created.department_ids, (136, 140))
+            self.assertEqual(updated.department_ids, (136, 150))
+            self.assertEqual(len([user for user in store.list_users() if user["username"] == "jani.konicoti"]), 1)
+
+    def test_osticket_bcrypt_login_reads_primary_and_additional_departments(self) -> None:
+        password = "portale-segreto"
+        stored_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=4)).decode("ascii")
+        stored_hash = stored_hash.replace("$2b$", "$2a$", 1)
+
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.query_count = 0
+
+            def execute(self, *_args: object) -> None:
+                self.query_count += 1
+
+            def fetchone(self):  # type: ignore[no-untyped-def]
+                return (418, "jani.konicoti", stored_hash, None, 1, 0, 136)
+
+            def fetchall(self):  # type: ignore[no-untyped-def]
+                return [(140,), (136,)]
+
+            def close(self) -> None:
+                return None
+
+        class FakeConnection:
+            def cursor(self) -> FakeCursor:
+                return FakeCursor()
+
+        identity = OsTicketAuthenticator._authenticate_connection(FakeConnection(), "jani.konicoti", password)
+
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity.staff_id, 418)  # type: ignore[union-attr]
+        self.assertEqual(identity.department_ids, (136, 140))  # type: ignore[union-attr]
 
     @staticmethod
     def _write_index(path: Path, vectors: list[list[float]]) -> None:

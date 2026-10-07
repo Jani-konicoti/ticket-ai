@@ -22,6 +22,8 @@ class CurrentUser:
     role: Role
     all_departments: bool = True
     department_ids: tuple[int, ...] = ()
+    auth_source: str = "local"
+    external_staff_id: int | None = None
 
 
 class AuthStore:
@@ -46,13 +48,20 @@ class AuthStore:
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL CHECK(role IN ('admin', 'user')),
                     active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    all_departments INTEGER NOT NULL DEFAULT 1,
+                    auth_source TEXT NOT NULL DEFAULT 'local',
+                    external_staff_id INTEGER
                 )
                 """
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
             if "all_departments" not in columns:
                 conn.execute("ALTER TABLE users ADD COLUMN all_departments INTEGER NOT NULL DEFAULT 1")
+            if "auth_source" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN auth_source TEXT NOT NULL DEFAULT 'local'")
+            if "external_staff_id" not in columns:
+                conn.execute("ALTER TABLE users ADD COLUMN external_staff_id INTEGER")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_departments (
@@ -92,7 +101,7 @@ class AuthStore:
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
-                SELECT id, username, role, active, created_at, all_departments
+                SELECT id, username, role, active, created_at, all_departments, auth_source, external_staff_id
                 FROM users
                 ORDER BY role, username
                 """
@@ -111,6 +120,54 @@ class AuthStore:
             users.append(user)
         return users
 
+    def upsert_osticket_user(
+        self, username: str, staff_id: int, is_portal_admin: bool, department_ids: tuple[int, ...]
+    ) -> CurrentUser:
+        username = username.strip()
+        if not username:
+            raise ValueError("Username osTicket non valido.")
+        if not is_portal_admin and not department_ids:
+            raise ValueError("L'utente osTicket non ha reparti associati.")
+
+        with closing(self._connect()) as conn, conn:
+            existing = conn.execute(
+                "SELECT id, role FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+            all_departments = bool(is_portal_admin)
+            if existing:
+                user_id = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET active = 1, all_departments = ?, auth_source = 'osticket', external_staff_id = ?
+                    WHERE id = ?
+                    """,
+                    (int(all_departments), staff_id, user_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO users
+                        (username, password_hash, role, active, created_at, all_departments, auth_source, external_staff_id)
+                    VALUES (?, ?, 'user', 1, ?, ?, 'osticket', ?)
+                    """,
+                    (username, self.hash_password(secrets.token_urlsafe(48)), self._now(), int(all_departments), staff_id),
+                )
+                user_id = int(cursor.lastrowid)
+            self._replace_departments(conn, user_id, [] if all_departments else list(department_ids))
+
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT id, username, role, all_departments, auth_source, external_staff_id
+                FROM users WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+        assert row is not None
+        return self._user_from_row(row)
+
     def create_user(
         self, username: str, password: str, role: Role, all_departments: bool = True, department_ids: list[int] | None = None
     ) -> dict:
@@ -127,8 +184,9 @@ class AuthStore:
             with closing(self._connect()) as conn, conn:
                 cursor = conn.execute(
                     """
-                    INSERT INTO users (username, password_hash, role, active, created_at, all_departments)
-                    VALUES (?, ?, ?, 1, ?, ?)
+                    INSERT INTO users
+                        (username, password_hash, role, active, created_at, all_departments, auth_source)
+                    VALUES (?, ?, ?, 1, ?, ?, 'local')
                     """,
                     (username, self.hash_password(password), role, self._now(), int(all_departments or role == "admin")),
                 )
@@ -148,9 +206,11 @@ class AuthStore:
 
     def update_departments(self, user_id: int, all_departments: bool, department_ids: list[int]) -> dict:
         with closing(self._connect()) as conn, conn:
-            row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+            row = conn.execute("SELECT role, auth_source FROM users WHERE id = ?", (user_id,)).fetchone()
             if not row:
                 raise ValueError("Utente non trovato.")
+            if row["auth_source"] == "osticket":
+                raise ValueError("I reparti di questo utente sono sincronizzati automaticamente da osTicket.")
             effective_all = bool(all_departments or row["role"] == "admin")
             if row["role"] == "user" and not effective_all and not department_ids:
                 raise ValueError("Seleziona almeno un reparto oppure abilita Tutti.")
@@ -171,7 +231,7 @@ class AuthStore:
         with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 """
-                SELECT id, username, password_hash, role, all_departments
+                SELECT id, username, password_hash, role, all_departments, auth_source, external_staff_id
                 FROM users
                 WHERE username = ? AND active = 1
                 """,
@@ -184,8 +244,10 @@ class AuthStore:
     def create_session(self, user_id: int) -> str:
         token = secrets.token_urlsafe(36)
         now = datetime.utcnow()
-        expires = now + timedelta(days=7)
         with closing(self._connect()) as conn, conn:
+            row = conn.execute("SELECT auth_source FROM users WHERE id = ?", (user_id,)).fetchone()
+            external_login = bool(row and row["auth_source"] == "osticket")
+            expires = now + (timedelta(hours=12) if external_login else timedelta(days=7))
             conn.execute(
                 """
                 INSERT INTO auth_sessions (token, user_id, created_at, expires_at)
@@ -202,7 +264,8 @@ class AuthStore:
         with closing(self._connect()) as conn, conn:
             row = conn.execute(
                 """
-                SELECT users.id, users.username, users.role, users.all_departments
+                SELECT users.id, users.username, users.role, users.all_departments,
+                       users.auth_source, users.external_staff_id
                 FROM auth_sessions
                 JOIN users ON users.id = auth_sessions.user_id
                 WHERE auth_sessions.token = ?
@@ -227,6 +290,8 @@ class AuthStore:
             role=row["role"],
             all_departments=bool(row["all_departments"]) or row["role"] == "admin",
             department_ids=tuple(int(item["department_id"]) for item in departments),
+            auth_source=str(row["auth_source"] or "local"),
+            external_staff_id=int(row["external_staff_id"]) if row["external_staff_id"] is not None else None,
         )
 
     def delete_session(self, token: str) -> None:

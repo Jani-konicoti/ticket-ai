@@ -47,6 +47,8 @@ class UserResponse(BaseModel):
     created_at: str | None = None
     all_departments: bool = True
     department_ids: list[int] = Field(default_factory=list)
+    auth_source: str = "local"
+    external_staff_id: int | None = None
 
 
 class AuthResponse(BaseModel):

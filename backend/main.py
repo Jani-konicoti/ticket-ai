@@ -30,6 +30,7 @@ from .models import (
     UserResponse,
 )
 from .openai_service import OpenAIService
+from .osticket_auth import OsTicketAuthenticator, PortalAuthUnavailable
 from .ticket_store import TicketStore
 
 
@@ -66,6 +67,11 @@ def get_openai_service() -> OpenAIService:
         chat_model=settings.openai_chat_model,
         embedding_model=settings.openai_embedding_model,
     )
+
+
+@lru_cache(maxsize=1)
+def get_osticket_authenticator() -> OsTicketAuthenticator:
+    return OsTicketAuthenticator()
 
 
 job_manager = JobManager(get_settings().app_data_dir / "app_config.sqlite", name="index")
@@ -251,15 +257,36 @@ def start_scheduled_jobs() -> None:
 
 @app.post("/api/auth/login", response_model=AuthResponse)
 def login(payload: LoginRequest) -> AuthResponse:
-    user = get_auth_store().authenticate(payload.username, payload.password)
+    auth_store = get_auth_store()
+    user = auth_store.authenticate(payload.username, payload.password)
+    if not user:
+        try:
+            identity = get_osticket_authenticator().authenticate(
+                get_config_store().get_config(), payload.username, payload.password
+            )
+        except PortalAuthUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if identity:
+            try:
+                user = auth_store.upsert_osticket_user(
+                    identity.username,
+                    identity.staff_id,
+                    identity.is_admin,
+                    identity.department_ids,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not user:
         raise HTTPException(status_code=401, detail="Username o password non validi.")
-    token = get_auth_store().create_session(user.id)
+    token = auth_store.create_session(user.id)
     return AuthResponse(
         token=token,
         user=UserResponse(
             id=user.id, username=user.username, role=user.role, active=True, created_at=None,
-            all_departments=user.all_departments, department_ids=list(user.department_ids)
+            all_departments=user.all_departments,
+            department_ids=list(user.department_ids),
+            auth_source=user.auth_source,
+            external_staff_id=user.external_staff_id,
         ),
     )
 
@@ -274,6 +301,8 @@ def me(current_user: CurrentUser = Depends(require_user)) -> UserResponse:
         created_at=None,
         all_departments=current_user.all_departments,
         department_ids=list(current_user.department_ids),
+        auth_source=current_user.auth_source,
+        external_staff_id=current_user.external_staff_id,
     )
 
 
@@ -310,7 +339,7 @@ def update_user_departments(
             **get_auth_store().update_departments(user_id, payload.all_departments, payload.department_ids)
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/filters")

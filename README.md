@@ -40,6 +40,8 @@ Al primo avvio viene creato un utente admin locale in `backend/app_config.sqlite
 
 Da UI l'admin puo' creare altri utenti con ruolo `admin` o `user` e limitare ogni operatore a uno o piu' reparti.
 
+Gli operatori osTicket con autenticazione locale bcrypt possono accedere usando direttamente le credenziali del portale. Al primo login l'utente viene creato nel database applicativo; a ogni login vengono sincronizzati il reparto principale (`ost_staff.dept_id`) e gli accessi aggiuntivi (`ost_staff_dept_access`). La password del portale non viene salvata. Gli admin del Knowledge Assistant restano account locali separati.
+
 Se Node non riesce a verificare il certificato del registry npm, usa lo store certificati di Windows nella sessione corrente:
 
 ```powershell
