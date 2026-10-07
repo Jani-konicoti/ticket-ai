@@ -696,8 +696,23 @@ textarea:focus {
   font-size: 0.82rem;
 }
 
-.hit-topline strong {
+.hit-topline strong,
+.hit-topline a {
   color: #d61f2a;
+}
+
+.hit-topline a,
+.ticket-snippet a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.hit-topline a:hover,
+.ticket-snippet a:hover {
+  text-decoration: underline;
 }
 
 .hit-topline span {
@@ -1010,7 +1025,8 @@ textarea:focus {
   font-weight: 800;
 }
 
-.ticket-snippet strong {
+.ticket-snippet strong,
+.ticket-snippet a {
   color: #d61f2a;
 }
 

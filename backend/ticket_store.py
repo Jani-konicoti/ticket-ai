@@ -184,8 +184,9 @@ class StoreStats:
 
 
 class TicketStore:
-    def __init__(self, faiss_dir: Path) -> None:
+    def __init__(self, faiss_dir: Path, ticket_url_base: str = "https://ticket.centropaghe.it/scp/tickets.php") -> None:
         self.faiss_dir = faiss_dir
+        self.ticket_url_base = ticket_url_base.strip()
         self.index_path = faiss_dir / "ticket_index.faiss"
         self.csv_path = faiss_dir / "ticket_data.csv"
         self.ids_path = faiss_dir / "ticket_ids.txt"
@@ -240,6 +241,9 @@ class TicketStore:
         missing = expected - set(df.columns)
         if missing:
             raise ValueError(f"Colonne mancanti nel CSV: {', '.join(sorted(missing))}")
+        for optional_column in ("ticket_id", "ticket_number"):
+            if optional_column not in df.columns:
+                df[optional_column] = None
         df["created_dt"] = pd.to_datetime(df["created"], errors="coerce")
         return df
 
@@ -292,12 +296,17 @@ class TicketStore:
                 continue
             body = _clean_text(row.get("clean_body"))
             title = _clean_text(row.get("title")) or "Senza titolo"
+            source_ticket_id = self._json_value(row.get("ticket_id"))
+            ticket_number = self._json_value(row.get("ticket_number"))
             hits.append(
                 {
                     "rank": len(hits) + 1,
                     "score": score,
-                    "id": self._json_value(row.get("id", ticket_id)),
+                    "id": source_ticket_id or self._json_value(row.get("id", ticket_id)),
                     "thread_id": self._json_value(row.get("thread_id")),
+                    "ticket_id": source_ticket_id,
+                    "ticket_number": ticket_number,
+                    "ticket_url": self._ticket_url(source_ticket_id),
                     "title": title,
                     "created": self._json_value(row.get("created")),
                     "poster": self._json_value(row.get("poster")),
@@ -359,9 +368,13 @@ class TicketStore:
             priority, priority_score = _priority_for(count, recent_count, high_impact_count)
             latest_tickets = []
             for _, row in group.head(6).iterrows():
+                source_ticket_id = self._json_value(row.get("ticket_id"))
                 latest_tickets.append(
                     {
-                        "id": self._json_value(row.get("id")),
+                        "id": source_ticket_id or self._json_value(row.get("id")),
+                        "ticket_id": source_ticket_id,
+                        "ticket_number": self._json_value(row.get("ticket_number")),
+                        "ticket_url": self._ticket_url(source_ticket_id),
                         "created": self._json_value(row.get("created")),
                         "title": _clean_text(row.get("title")) or "Senza titolo",
                         "poster": self._json_value(row.get("poster")),
@@ -382,7 +395,7 @@ class TicketStore:
                     "recurring": count >= 2,
                     "first_seen": self._date_value(first_seen_dt),
                     "last_seen": self._date_value(last_seen_dt),
-                    "sample_ticket_ids": [self._json_value(value) for value in group["id"].head(8).tolist()],
+                    "sample_ticket_ids": [self._json_value(value) for value in group["ticket_number"].head(8).tolist()],
                     "sample_titles": titles,
                     "keywords": _keywords(combined_text),
                     "latest_tickets": latest_tickets,
@@ -408,13 +421,21 @@ class TicketStore:
         for _, row in recent.iterrows():
             sample.append(
                 {
-                    "id": self._json_value(row.get("id")),
+                    "id": self._json_value(row.get("ticket_number")) or self._json_value(row.get("ticket_id")) or self._json_value(row.get("id")),
+                    "ticket_number": self._json_value(row.get("ticket_number")),
                     "created": self._json_value(row.get("created")),
                     "title": _clean_text(row.get("title")),
                     "body": _excerpt(_clean_text(row.get("clean_body")), 350),
                 }
             )
         return sample
+
+    def _ticket_url(self, ticket_id: Any) -> str | None:
+        value = self._json_value(ticket_id)
+        if value is None or not self.ticket_url_base:
+            return None
+        separator = "&" if "?" in self.ticket_url_base else "?"
+        return f"{self.ticket_url_base}{separator}id={value}"
 
     @staticmethod
     def _date_value(value: Any) -> str | None:

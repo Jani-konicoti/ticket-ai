@@ -40,6 +40,8 @@ MAX_INDEX_SHARD_VECTORS = 20_000
 CSV_COLUMNS = [
     "id",
     "thread_id",
+    "ticket_id",
+    "ticket_number",
     "staff_id",
     "user_id",
     "poster",
@@ -62,7 +64,7 @@ WHERE title <> 'Stato modificato'
   AND title NOT LIKE '%Ticket assegnato a%'
   AND LENGTH(body) > 70
 """.strip()
-DEFAULT_QUERY = """
+CONVERSATION_DEFAULT_QUERY_V1 = """
 SELECT
   e.id,
   e.thread_id,
@@ -73,6 +75,42 @@ SELECT
   COALESCE(NULLIF(tc.subject, ''), NULLIF(e.title, ''), CONCAT('Ticket ', t.number)) AS title,
   e.body,
   e.type AS entry_type
+FROM ost_thread_entry e
+JOIN ost_thread th
+  ON th.id = e.thread_id
+ AND th.object_type = 'T'
+JOIN ost_ticket t
+  ON t.ticket_id = th.object_id
+LEFT JOIN ost_ticket__cdata tc
+  ON tc.ticket_id = t.ticket_id
+WHERE e.type IN ('M', 'R', 'N')
+  AND LENGTH(e.body) > 20
+  AND (
+    e.type <> 'N'
+    OR e.title IS NULL
+    OR (
+      e.title <> 'Stato modificato'
+      AND e.title <> 'Nuovo collaboratore aggiunto'
+      AND e.title <> 'Ticket aggiornato'
+      AND e.title NOT LIKE '%Nuovo ticket da%'
+      AND e.title NOT LIKE '%Ticket assegnato a%'
+      AND e.title NOT LIKE '%Ticket trasferito da%'
+    )
+  )
+""".strip()
+DEFAULT_QUERY = """
+SELECT
+  e.id,
+  e.thread_id,
+  e.staff_id,
+  e.user_id,
+  e.poster,
+  e.created,
+  COALESCE(NULLIF(tc.subject, ''), NULLIF(e.title, ''), CONCAT('Ticket ', t.number)) AS title,
+  e.body,
+  e.type AS entry_type,
+  t.ticket_id,
+  t.number AS ticket_number
 FROM ost_thread_entry e
 JOIN ost_thread th
   ON th.id = e.thread_id
@@ -241,7 +279,10 @@ class ConfigStore:
         data = json.loads(row[0])
         if not data.get("query"):
             data["query"] = DEFAULT_QUERY
-        elif _normalized_query(data["query"]) == _normalized_query(LEGACY_DEFAULT_QUERY):
+        elif _normalized_query(data["query"]) in {
+            _normalized_query(LEGACY_DEFAULT_QUERY),
+            _normalized_query(CONVERSATION_DEFAULT_QUERY_V1),
+        }:
             data["query"] = DEFAULT_QUERY
             config = DatabaseConfig(**data)
             return self.save_config(config)
@@ -685,6 +726,8 @@ class VectorIndexBuilder:
                     {
                         "id": last["id"],
                         "thread_id": last["thread_id"],
+                        "ticket_id": last["ticket_id"],
+                        "ticket_number": last["ticket_number"],
                         "staff_id": last["staff_id"],
                         "user_id": last["user_id"],
                         "poster": "Conversazione",
@@ -722,15 +765,20 @@ class VectorIndexBuilder:
 
     @staticmethod
     def _source_row(row: Any) -> dict[str, Any]:
-        if len(row) < 8:
+        if len(row) < 11:
             raise RuntimeError(
-                "La query deve restituire almeno: id, thread_id, staff_id, user_id, poster, created, title, body."
+                "La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, "
+                "entry_type, ticket_id, ticket_number."
             )
         id_, thread_id, staff_id, user_id, poster, created, title, body = row[:8]
-        entry_type = str(row[8] or "") if len(row) >= 9 else ("R" if int(staff_id or 0) else "M")
+        entry_type = str(row[8] or "")
+        ticket_id = row[9]
+        ticket_number = row[10]
         return {
             "id": id_,
             "thread_id": thread_id,
+            "ticket_id": ticket_id,
+            "ticket_number": ticket_number,
             "staff_id": staff_id,
             "user_id": user_id,
             "poster": str(poster or "Sconosciuto").strip(),
@@ -770,7 +818,8 @@ class VectorIndexBuilder:
         if not blocks:
             return []
 
-        header = f"Titolo ticket: {title}\nThread: {entries[0]['thread_id']}\n"
+        ticket_number = entries[0].get("ticket_number") or entries[0].get("ticket_id")
+        header = f"Ticket #{ticket_number}\nTitolo ticket: {title}\nThread: {entries[0]['thread_id']}\n"
         encoding = cls._encoding()
         header_tokens = encoding.encode(header)
         available = max(500, MAX_EMBED_TOKENS - len(header_tokens) - 10)
@@ -833,7 +882,7 @@ class VectorIndexBuilder:
             writer = csv.writer(csv_file, delimiter=";")
             for row in pending_rows:
                 writer.writerow([row[column] for column in CSV_COLUMNS])
-                ids_file.write(f"{row['id']}\n")
+                ids_file.write(f"{row['source_last_entry_id']}\n")
                 job.written += 1
 
         pending_rows.clear()

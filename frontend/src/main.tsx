@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Clock3,
   Database,
+  ExternalLink,
   Filter,
   History,
   KeyRound,
@@ -52,6 +53,9 @@ type Hit = {
   score: number;
   id: number | string;
   thread_id?: number | string | null;
+  ticket_id?: number | string | null;
+  ticket_number?: number | string | null;
+  ticket_url?: string | null;
   title: string;
   created?: string | null;
   poster?: string | null;
@@ -83,6 +87,9 @@ type ProblemGroup = {
   keywords: string[];
   latest_tickets: Array<{
     id: number | string;
+    ticket_id?: number | string | null;
+    ticket_number?: number | string | null;
+    ticket_url?: string | null;
     created?: string | null;
     title: string;
     poster?: string | null;
@@ -910,7 +917,14 @@ function App() {
                   {pagedHits.map((hit) => (
                     <article className="hit-card interactive-card" key={`${hit.id}-${hit.rank}`}>
                       <div className="hit-topline">
-                        <strong>Ticket #{hit.id}</strong>
+                        {hit.ticket_url ? (
+                          <a href={hit.ticket_url} target="_blank" rel="noreferrer">
+                            Ticket #{hit.ticket_number || hit.id}
+                            <ExternalLink size={14} />
+                          </a>
+                        ) : (
+                          <strong>Ticket #{hit.ticket_number || hit.id}</strong>
+                        )}
                         <span>{hit.score.toFixed(4)}</span>
                       </div>
                       <h3>{hit.title}</h3>
@@ -1205,7 +1219,7 @@ function App() {
               <MessageSquareText size={19} />
               <div>
                 <h2>Query ticket</h2>
-                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, entry_type.</p>
+                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, ticket_id, ticket_number.</p>
               </div>
             </div>
             <textarea
@@ -1461,7 +1475,14 @@ function ProblemGroupCard({
           {visibleTickets.map((ticket) => (
             <div className="ticket-snippet" key={`${group.key}-${ticket.id}`}>
               <div>
-                <strong>#{ticket.id}</strong>
+                {ticket.ticket_url ? (
+                  <a href={ticket.ticket_url} target="_blank" rel="noreferrer">
+                    #{ticket.ticket_number || ticket.id}
+                    <ExternalLink size={13} />
+                  </a>
+                ) : (
+                  <strong>#{ticket.ticket_number || ticket.id}</strong>
+                )}
                 <span>{ticket.created || "data n/d"}</span>
               </div>
               <h4>{ticket.title}</h4>

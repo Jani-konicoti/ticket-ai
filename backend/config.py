@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default="http://localhost:5173,http://127.0.0.1:5173",
         alias="ALLOWED_ORIGINS",
     )
+    osticket_ticket_url: str = Field(
+        default="https://ticket.centropaghe.it/scp/tickets.php",
+        alias="OSTICKET_TICKET_URL",
+    )
 
     model_config = SettingsConfigDict(populate_by_name=True, extra="ignore")
 

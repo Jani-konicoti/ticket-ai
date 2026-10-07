@@ -12,6 +12,9 @@ class TicketHit(BaseModel):
     score: float
     id: int | str
     thread_id: int | str | None = None
+    ticket_id: int | str | None = None
+    ticket_number: int | str | None = None
+    ticket_url: str | None = None
     title: str
     created: str | None = None
     poster: str | None = None

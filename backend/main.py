@@ -39,7 +39,7 @@ app = FastAPI(title="Ticket Knowledge Assistant", version="0.1.0")
 @lru_cache(maxsize=1)
 def get_store() -> TicketStore:
     settings = get_settings()
-    return TicketStore(settings.faiss_dir)
+    return TicketStore(settings.faiss_dir, settings.osticket_ticket_url)
 
 
 @lru_cache(maxsize=1)

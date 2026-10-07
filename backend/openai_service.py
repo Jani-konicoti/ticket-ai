@@ -52,7 +52,7 @@ class OpenAIService:
         context = "\n\n".join(
             [
                 (
-                    f"[Ticket {hit.id} | score {hit.score:.4f} | {hit.created or 'data n/d'}]\n"
+                    f"[Ticket #{hit.ticket_number or hit.id} | score {hit.score:.4f} | {hit.created or 'data n/d'}]\n"
                     f"Titolo: {hit.title}\n"
                     f"Testo: {hit.body[:2500]}"
                 )

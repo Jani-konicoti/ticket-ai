@@ -12,6 +12,7 @@ import pandas as pd
 from backend.index_builder import (
     CSV_COLUMNS,
     DEFAULT_QUERY,
+    CONVERSATION_DEFAULT_QUERY_V1,
     LEGACY_DEFAULT_QUERY,
     ConfigStore,
     JobState,
@@ -37,6 +38,8 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertEqual(store.stats.vectors, 3)
             self.assertEqual([hit["id"] for hit in hits], [3, 1])
             self.assertEqual([hit["rank"] for hit in hits], [1, 2])
+            self.assertEqual(hits[0]["ticket_number"], 3)
+            self.assertEqual(hits[0]["ticket_url"], "https://ticket.centropaghe.it/scp/tickets.php?id=3")
 
     def test_append_uses_monthly_shard_without_loading_base_index(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -63,11 +66,30 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertIn("WHERE id > %s", selected_queries[0])
             self.assertEqual(selected_params[0], (1,))
 
+    def test_search_exposes_public_number_and_internal_ticket_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            faiss_dir = Path(temp_dir)
+            self._write_index(faiss_dir / "ticket_index.faiss", [[1.0, 1.0]])
+            (faiss_dir / "ticket_ids.txt").write_text("7475088\n", encoding="utf-8")
+            self._write_metadata(faiss_dir / "ticket_data.csv", ticket_ids=(7475088,))
+            metadata = pd.read_csv(faiss_dir / "ticket_data.csv", sep=";")
+            metadata.loc[0, "ticket_id"] = 1865112
+            metadata.loc[0, "ticket_number"] = 1865081
+            metadata.to_csv(faiss_dir / "ticket_data.csv", sep=";", index=False)
+
+            hit = TicketStore(faiss_dir).search([1.0, 1.0], top_k=1)[0]
+
+            self.assertEqual(hit["id"], 1865112)
+            self.assertEqual(hit["ticket_number"], 1865081)
+            self.assertEqual(hit["ticket_url"], "https://ticket.centropaghe.it/scp/tickets.php?id=1865112")
+
     def test_conversation_cleaning_keeps_question_and_answer(self) -> None:
         entries = [
             {
                 "id": 10,
                 "thread_id": 7,
+                "ticket_id": 100,
+                "ticket_number": 99,
                 "staff_id": 0,
                 "user_id": 3,
                 "poster": "Anna",
@@ -79,6 +101,8 @@ class TicketStoreShardTests(unittest.TestCase):
             {
                 "id": 11,
                 "thread_id": 7,
+                "ticket_id": 100,
+                "ticket_number": 99,
                 "staff_id": 4,
                 "user_id": 0,
                 "poster": "Benedetta",
@@ -90,6 +114,8 @@ class TicketStoreShardTests(unittest.TestCase):
             {
                 "id": 12,
                 "thread_id": 7,
+                "ticket_id": 100,
+                "ticket_number": 99,
                 "staff_id": 4,
                 "user_id": 0,
                 "poster": "Sistema",
@@ -104,6 +130,7 @@ class TicketStoreShardTests(unittest.TestCase):
 
         self.assertEqual(len(chunks), 1)
         self.assertIn("[Cliente - Anna", chunks[0])
+        self.assertIn("Ticket #99", chunks[0])
         self.assertIn("Il cliente riceve anche una mail?", chunks[0])
         self.assertIn("[Operatore - Benedetta", chunks[0])
         self.assertIn("soltanto nei log", chunks[0])
@@ -140,11 +167,22 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertEqual(migrated.query, DEFAULT_QUERY)
             self.assertIn("ost_ticket__cdata", migrated.query)
 
+    def test_conversation_v1_query_is_migrated_with_ticket_identifiers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = ConfigStore(Path(temp_dir) / "config.sqlite")
+            store.save_config(DatabaseConfig(query=CONVERSATION_DEFAULT_QUERY_V1))
+
+            migrated = store.get_config()
+
+            self.assertEqual(migrated.query, DEFAULT_QUERY)
+            self.assertIn("t.ticket_id", migrated.query)
+            self.assertIn("t.number AS ticket_number", migrated.query)
+
     def test_cursor_groups_ordered_entries_by_thread(self) -> None:
         rows = [
-            (1, 10, 0, 5, "Cliente", "2026-10-01 10:00:00", "Titolo A", "<p>Domanda del cliente abbastanza lunga.</p>", "M"),
-            (2, 10, 7, 0, "Tecnico", "2026-10-01 11:00:00", "Titolo A", "<p>Risposta risolutiva del tecnico.</p>", "R"),
-            (3, 20, 0, 6, "Altro cliente", "2026-10-02 10:00:00", "Titolo B", "<p>Seconda conversazione indipendente.</p>", "M"),
+            (1, 10, 0, 5, "Cliente", "2026-10-01 10:00:00", "Titolo A", "<p>Domanda del cliente abbastanza lunga.</p>", "M", 101, 1001),
+            (2, 10, 7, 0, "Tecnico", "2026-10-01 11:00:00", "Titolo A", "<p>Risposta risolutiva del tecnico.</p>", "R", 101, 1001),
+            (3, 20, 0, 6, "Altro cliente", "2026-10-02 10:00:00", "Titolo B", "<p>Seconda conversazione indipendente.</p>", "M", 202, 2002),
         ]
 
         class FakeCursor:
@@ -197,6 +235,8 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertIn("Domanda del cliente", metadata.iloc[0]["clean_body"])
             self.assertIn("Risposta risolutiva", metadata.iloc[0]["clean_body"])
             self.assertNotIn("Seconda conversazione", metadata.iloc[0]["clean_body"])
+            self.assertEqual(metadata.iloc[0]["ticket_id"], 101)
+            self.assertEqual(metadata.iloc[0]["ticket_number"], 1001)
 
     @staticmethod
     def _write_index(path: Path, vectors: list[list[float]]) -> None:
@@ -212,6 +252,8 @@ class TicketStoreShardTests(unittest.TestCase):
             for ticket_id in ticket_ids:
                 writer.writerow(
                     [
+                        ticket_id,
+                        ticket_id,
                         ticket_id,
                         ticket_id,
                         "",
