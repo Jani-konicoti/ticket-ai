@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import csv
+import errno
 import gc
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +36,7 @@ EMBEDDING_MODEL = "text-embedding-3-large"
 MAX_EMBED_TOKENS = 7200
 MAX_EMBED_BATCH_TOKENS = 80000
 CHUNK_TOKEN_OVERLAP = 160
+MAX_INDEX_SHARD_VECTORS = 20_000
 CSV_COLUMNS = [
     "id",
     "thread_id",
@@ -44,9 +48,11 @@ CSV_COLUMNS = [
     "clean_body",
     "chunk_index",
     "chunk_count",
+    "source_first_entry_id",
+    "source_last_entry_id",
 ]
 logger = logging.getLogger(__name__)
-DEFAULT_QUERY = """
+LEGACY_DEFAULT_QUERY = """
 SELECT id, thread_id, staff_id, user_id, poster, created, title, body
 FROM ost_thread_entry
 WHERE title <> 'Stato modificato'
@@ -56,11 +62,72 @@ WHERE title <> 'Stato modificato'
   AND title NOT LIKE '%Ticket assegnato a%'
   AND LENGTH(body) > 70
 """.strip()
+DEFAULT_QUERY = """
+SELECT
+  e.id,
+  e.thread_id,
+  e.staff_id,
+  e.user_id,
+  e.poster,
+  e.created,
+  COALESCE(NULLIF(tc.subject, ''), NULLIF(e.title, ''), CONCAT('Ticket ', t.number)) AS title,
+  e.body,
+  e.type AS entry_type
+FROM ost_thread_entry e
+JOIN ost_thread th
+  ON th.id = e.thread_id
+ AND th.object_type = 'T'
+JOIN ost_ticket t
+  ON t.ticket_id = th.object_id
+LEFT JOIN ost_ticket__cdata tc
+  ON tc.ticket_id = t.ticket_id
+WHERE e.type IN ('M', 'R', 'N')
+  AND LENGTH(e.body) > 20
+  AND (
+    e.type <> 'N'
+    OR e.title IS NULL
+    OR (
+      e.title <> 'Stato modificato'
+      AND e.title <> 'Nuovo collaboratore aggiunto'
+      AND e.title <> 'Ticket aggiornato'
+      AND e.title NOT LIKE '%Nuovo ticket da%'
+      AND e.title NOT LIKE '%Ticket assegnato a%'
+      AND e.title NOT LIKE '%Ticket trasferito da%'
+    )
+  )
+""".strip()
+
+QUOTE_MARKERS = (
+    "-----original message-----",
+    "-----messaggio originale-----",
+    "________________________________",
+    "da:",
+    "from:",
+    "inviato:",
+    "sent:",
+)
+DISCLAIMER_MARKERS = (
+    "ai sensi degli artt. 13 e 14",
+    "ai sensi del regolamento europeo",
+    "le informazioni e i dati contenuti",
+    "le informazioni contenute in questo messaggio",
+    "questo messaggio di posta elettronica e gli eventuali allegati",
+    "il presente messaggio e gli eventuali allegati",
+    "avvertenza di riservatezza",
+    "confidentiality notice",
+    "the information contained in this message",
+)
+SIGNATURE_MARKERS = (
+    "cordiali saluti",
+    "distinti saluti",
+    "buona giornata",
+    "saluti,",
+)
 
 
 def clean_body(html: Any) -> str:
     soup = BeautifulSoup(str(html or ""), "html.parser")
-    for tag in soup.find_all(["img", "hr", "style", "script"]):
+    for tag in soup.find_all(["img", "hr", "style", "script", "svg", "blockquote"]):
         tag.decompose()
     for br in soup.find_all("br"):
         br.replace_with("\n")
@@ -68,31 +135,25 @@ def clean_body(html: Any) -> str:
     text = soup.get_text(separator="\n")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    cleaned_lines = []
-    noise = [
-        "informazioni di carattere confidenziale",
-        "questo messaggio di posta elettronica",
-        "virus",
-        "eset",
-        "avast",
-        "kaspersky",
-        "inviato:",
-        "da:",
-        "to:",
-        "from:",
-        "subject:",
-        "firma",
-        "tel",
-        "fax",
-        "@",
-        "www.",
-    ]
+    cleaned_lines: list[str] = []
+    seen_lines: set[str] = set()
     for line in lines:
-        lowered = line.lower()
-        if any(keyword in lowered for keyword in noise):
+        line = re.sub(r"\bcid:[^\s]+", "", line, flags=re.IGNORECASE).strip()
+        line = re.sub(r"https?://\S+", "", line, flags=re.IGNORECASE).strip()
+        lowered = re.sub(r"\s+", " ", line.lower()).strip()
+        if not lowered:
             continue
+        if any(marker in lowered for marker in DISCLAIMER_MARKERS):
+            break
+        if any(lowered.startswith(marker) for marker in QUOTE_MARKERS):
+            break
         if "il " in lowered and " ha scritto" in lowered:
+            break
+        if cleaned_lines and any(lowered.startswith(marker) for marker in SIGNATURE_MARKERS):
+            break
+        if lowered in seen_lines:
             continue
+        seen_lines.add(lowered)
         cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines).strip()
@@ -107,7 +168,21 @@ def _strip_query(query: str) -> str:
 
 
 def _date_filter_query(base_query: str, operator: str) -> str:
-    return f"SELECT * FROM ({_strip_query(base_query)}) AS source_query WHERE created {operator} %s ORDER BY created, id"
+    return (
+        f"SELECT * FROM ({_strip_query(base_query)}) AS source_query "
+        f"WHERE created {operator} %s ORDER BY thread_id, created, id"
+    )
+
+
+def _id_filter_query(base_query: str, operator: str) -> str:
+    return (
+        f"SELECT * FROM ({_strip_query(base_query)}) AS source_query "
+        f"WHERE id {operator} %s ORDER BY thread_id, created, id"
+    )
+
+
+def _normalized_query(query: str) -> str:
+    return " ".join(_strip_query(query).lower().split())
 
 
 def _count_query(filtered_query: str) -> str:
@@ -147,7 +222,7 @@ class ConfigStore:
         return sqlite3.connect(self.path)
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS app_config (
@@ -156,23 +231,29 @@ class ConfigStore:
                 )
                 """
             )
+            conn.commit()
 
     def get_config(self) -> DatabaseConfig:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute("SELECT value FROM app_config WHERE key = 'database_config'").fetchone()
         if not row:
             return DatabaseConfig(query=DEFAULT_QUERY)
         data = json.loads(row[0])
         if not data.get("query"):
             data["query"] = DEFAULT_QUERY
+        elif _normalized_query(data["query"]) == _normalized_query(LEGACY_DEFAULT_QUERY):
+            data["query"] = DEFAULT_QUERY
+            config = DatabaseConfig(**data)
+            return self.save_config(config)
         return DatabaseConfig(**data)
 
     def save_config(self, config: DatabaseConfig) -> DatabaseConfig:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO app_config (key, value) VALUES ('database_config', ?)",
                 (config.model_dump_json(),),
             )
+            conn.commit()
         return config
 
 
@@ -344,6 +425,20 @@ class VectorIndexBuilder:
             return None
         return latest.strftime("%Y-%m-%d %H:%M:%S")
 
+    def latest_local_entry_id(self) -> int | None:
+        if not self.csv_path.exists():
+            return None
+        columns = pd.read_csv(self.csv_path, sep=";", encoding="utf-8", nrows=0).columns
+        source_column = "source_last_entry_id" if "source_last_entry_id" in columns else "id"
+        values = pd.read_csv(self.csv_path, sep=";", encoding="utf-8", usecols=[source_column])
+        numeric = pd.to_numeric(values[source_column], errors="coerce").dropna()
+        if numeric.empty and source_column != "id":
+            values = pd.read_csv(self.csv_path, sep=";", encoding="utf-8", usecols=["id"])
+            numeric = pd.to_numeric(values["id"], errors="coerce").dropna()
+        if numeric.empty:
+            return None
+        return int(numeric.max())
+
     def rebuild(self, config: DatabaseConfig, from_date: str, job: JobState) -> None:
         final_dir = self.faiss_dir
         build_dir = final_dir.parent / f"{final_dir.name}_build"
@@ -382,17 +477,17 @@ class VectorIndexBuilder:
             self._set_output_dir(final_dir)
 
     def append_until_today(self, config: DatabaseConfig, job: JobState) -> None:
-        latest = self.latest_local_ticket_date()
-        if not latest:
+        latest_entry_id = self.latest_local_entry_id()
+        if latest_entry_id is None:
             raise RuntimeError("Nessun indice locale trovato: esegui prima una ricostruzione da zero.")
 
         existing_ids = self._read_existing_ids()
-        query = _date_filter_query(config.query, ">")
+        query = _id_filter_query(config.query, ">")
         final_dir = self.faiss_dir
-        shard_path = final_dir / f"ticket_index.append-{datetime.now():%Y%m}.faiss"
+        shard_path = final_dir / f"ticket_index.append-{datetime.now():%Y%m}-part000.faiss"
         self.index_path = shard_path
         try:
-            self._run_query_to_index(config, query, (latest,), existing_ids, job)
+            self._run_query_to_index(config, query, (latest_entry_id,), existing_ids, job)
         finally:
             self._set_output_dir(final_dir)
 
@@ -421,13 +516,14 @@ class VectorIndexBuilder:
         if missing:
             raise RuntimeError(f"Nessuna build parziale riprendibile in {build_dir}: mancano {', '.join(missing)}.")
 
-        index = faiss.read_index(str(build_dir / "ticket_index.faiss"))
+        index_paths = [build_dir / "ticket_index.faiss", *sorted(build_dir.glob("ticket_index.append-*.faiss"))]
+        vector_count = sum(int(faiss.read_index(str(path)).ntotal) for path in index_paths)
         ids_count = sum(1 for line in (build_dir / "ticket_ids.txt").read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip())
-        if index.ntotal != ids_count:
+        if vector_count != ids_count:
             raise RuntimeError(
-                f"Build parziale incoerente: FAISS contiene {index.ntotal} vettori, ticket_ids.txt contiene {ids_count} righe."
+                f"Build parziale incoerente: FAISS contiene {vector_count} vettori, ticket_ids.txt contiene {ids_count} righe."
             )
-        return int(index.ntotal)
+        return vector_count
 
     @staticmethod
     def _resume_date_window(build_dir: Path, requested_from: str) -> tuple[str, str | None, str | None]:
@@ -531,6 +627,9 @@ class VectorIndexBuilder:
         cursor_count.close()
 
         index = faiss.read_index(str(self.index_path)) if self.index_path.exists() else None
+        while index is not None and index.ntotal >= MAX_INDEX_SHARD_VECTORS:
+            self.index_path = self._next_shard_path(self.index_path)
+            index = faiss.read_index(str(self.index_path)) if self.index_path.exists() else None
 
         cursor = conn.cursor()
         cursor.execute(query, params)
@@ -540,68 +639,151 @@ class VectorIndexBuilder:
         batch_tokens = 0
         flush_count = 0
 
-        job.step = "Lettura ticket"
-        for row in cursor:
-            job.current += 1
-            id_, thread_id, staff_id, user_id, poster, created, title, body = row
-            ticket_id = str(id_)
+        def flush_batch() -> None:
+            nonlocal index, flush_count, batch_tokens
+            if not batch_texts:
+                return
+            index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
+            flush_count += 1
+            if flush_count % self.save_every_batches == 0:
+                self._persist_checkpoint(index, pending_meta, job)
+            if index.ntotal >= MAX_INDEX_SHARD_VECTORS:
+                self._persist_checkpoint(index, pending_meta, job)
+                while index is not None and index.ntotal >= MAX_INDEX_SHARD_VECTORS:
+                    self.index_path = self._next_shard_path(self.index_path)
+                    index = faiss.read_index(str(self.index_path)) if self.index_path.exists() else None
+            batch_texts.clear()
+            batch_meta.clear()
+            batch_tokens = 0
 
-            if ticket_id in existing_ids:
-                job.skipped += 1
-                continue
+        def queue_conversation(entries: list[dict[str, Any]]) -> None:
+            nonlocal batch_tokens
+            if not entries:
+                return
+            conversation_id = str(entries[-1]["id"])
+            if conversation_id in existing_ids:
+                job.skipped += len(entries)
+                return
 
-            clean_text = clean_body(body)
-            if not clean_text or len(clean_text) < 30:
-                job.skipped += 1
-                continue
+            chunks = self._conversation_chunks(entries)
+            if not chunks:
+                job.skipped += len(entries)
+                return
 
-            chunks = self._split_for_embedding(clean_text)
-            chunk_count = len(chunks)
+            first = entries[0]
+            last = entries[-1]
+            title = next((str(entry["title"]).strip() for entry in entries if entry.get("title")), "Senza titolo")
             for chunk_index, chunk in enumerate(chunks, start=1):
                 chunk_tokens = self._count_tokens(chunk)
                 if batch_texts and (
                     len(batch_texts) >= effective_batch_size or batch_tokens + chunk_tokens > MAX_EMBED_BATCH_TOKENS
                 ):
-                    index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
-                    flush_count += 1
-                    if flush_count % self.save_every_batches == 0:
-                        self._persist_checkpoint(index, pending_meta, job)
-                    batch_texts.clear()
-                    batch_meta.clear()
-                    batch_tokens = 0
-
+                    flush_batch()
                 batch_texts.append(chunk)
                 batch_tokens += chunk_tokens
                 batch_meta.append(
                     {
-                        "id": id_,
-                        "thread_id": thread_id,
-                        "staff_id": staff_id,
-                        "user_id": user_id,
-                        "poster": poster,
-                        "created": str(created),
+                        "id": last["id"],
+                        "thread_id": last["thread_id"],
+                        "staff_id": last["staff_id"],
+                        "user_id": last["user_id"],
+                        "poster": "Conversazione",
+                        "created": str(last["created"]),
                         "title": title,
                         "clean_body": chunk,
                         "chunk_index": chunk_index,
-                        "chunk_count": chunk_count,
+                        "chunk_count": len(chunks),
+                        "source_first_entry_id": first["id"],
+                        "source_last_entry_id": last["id"],
                     }
                 )
             job.processed += 1
-
             if len(batch_texts) >= effective_batch_size:
-                index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
-                flush_count += 1
-                if flush_count % self.save_every_batches == 0:
-                    self._persist_checkpoint(index, pending_meta, job)
-                batch_texts.clear()
-                batch_meta.clear()
-                batch_tokens = 0
+                flush_batch()
 
+        job.step = "Lettura conversazioni"
+        current_thread_id: str | None = None
+        conversation: list[dict[str, Any]] = []
+        for raw_row in cursor:
+            job.current += 1
+            row = self._source_row(raw_row)
+            thread_id = str(row["thread_id"])
+            if current_thread_id is not None and thread_id != current_thread_id:
+                queue_conversation(conversation)
+                conversation = []
+            current_thread_id = thread_id
+            conversation.append(row)
+
+        queue_conversation(conversation)
         cursor.close()
-        if batch_texts:
-            index = self._embed_batch(index, batch_texts, batch_meta, pending_meta, existing_ids, job)
+        flush_batch()
         if index is not None and pending_meta:
             self._persist_checkpoint(index, pending_meta, job)
+
+    @staticmethod
+    def _source_row(row: Any) -> dict[str, Any]:
+        if len(row) < 8:
+            raise RuntimeError(
+                "La query deve restituire almeno: id, thread_id, staff_id, user_id, poster, created, title, body."
+            )
+        id_, thread_id, staff_id, user_id, poster, created, title, body = row[:8]
+        entry_type = str(row[8] or "") if len(row) >= 9 else ("R" if int(staff_id or 0) else "M")
+        return {
+            "id": id_,
+            "thread_id": thread_id,
+            "staff_id": staff_id,
+            "user_id": user_id,
+            "poster": str(poster or "Sconosciuto").strip(),
+            "created": created,
+            "title": title,
+            "body": body,
+            "entry_type": entry_type.upper(),
+        }
+
+    @classmethod
+    def _conversation_chunks(cls, entries: list[dict[str, Any]]) -> list[str]:
+        title = next((str(entry["title"]).strip() for entry in entries if entry.get("title")), "Senza titolo")
+        blocks: list[str] = []
+        seen_messages: set[str] = set()
+        role_labels = {"M": "Cliente", "R": "Operatore", "N": "Nota interna"}
+        automatic_note_markers = (
+            "stato modificato",
+            "nuovo collaboratore aggiunto",
+            "ticket aggiornato",
+            "nuovo ticket da",
+            "ticket assegnato a",
+            "ticket trasferito da",
+        )
+        for entry in entries:
+            clean_text = clean_body(entry.get("body"))
+            normalized = re.sub(r"\s+", " ", clean_text).strip().lower()
+            if len(normalized) < 20 or normalized in seen_messages:
+                continue
+            if entry.get("entry_type") == "N" and any(marker in normalized for marker in automatic_note_markers):
+                continue
+            seen_messages.add(normalized)
+            role = role_labels.get(str(entry.get("entry_type")), "Intervento")
+            blocks.append(
+                f"[{role} - {entry.get('poster') or 'Sconosciuto'} - {entry.get('created')}]\n{clean_text}"
+            )
+
+        if not blocks:
+            return []
+
+        header = f"Titolo ticket: {title}\nThread: {entries[0]['thread_id']}\n"
+        encoding = cls._encoding()
+        header_tokens = encoding.encode(header)
+        available = max(500, MAX_EMBED_TOKENS - len(header_tokens) - 10)
+        body_tokens = encoding.encode("\n\n".join(blocks))
+        chunks: list[str] = []
+        start = 0
+        while start < len(body_tokens):
+            end = min(start + available, len(body_tokens))
+            chunks.append(f"{header}\n{encoding.decode(body_tokens[start:end])}".strip())
+            if end >= len(body_tokens):
+                break
+            start = max(0, end - CHUNK_TOKEN_OVERLAP)
+        return chunks
 
     def _embed_batch(
         self,
@@ -667,10 +849,12 @@ class VectorIndexBuilder:
                 raise RuntimeError(f"Build incompleta: {name} non esiste o e' vuoto.")
 
         final_dir.mkdir(parents=True, exist_ok=True)
-        for name in required:
-            self._replace_with_retry(build_dir / name, final_dir / name)
         for shard_path in final_dir.glob("ticket_index.append-*.faiss"):
             shard_path.unlink()
+        for name in required:
+            self._replace_with_retry(build_dir / name, final_dir / name)
+        for shard_path in sorted(build_dir.glob("ticket_index.append-*.faiss")):
+            self._replace_with_retry(shard_path, final_dir / shard_path.name)
         job.message = "Nuovo FAISS pubblicato."
 
     @staticmethod
@@ -684,8 +868,30 @@ class VectorIndexBuilder:
                 last_error = exc
                 gc.collect()
                 time.sleep(min(0.5 * attempt, 4))
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                temp_destination = destination.with_name(f"{destination.name}.publish.tmp")
+                if temp_destination.exists():
+                    temp_destination.unlink()
+                shutil.copy2(source, temp_destination)
+                temp_destination.replace(destination)
+                source.unlink()
+                return
         assert last_error is not None
         raise last_error
+
+    @staticmethod
+    def _next_shard_path(current_path: Path) -> Path:
+        if current_path.name == "ticket_index.faiss":
+            next_name = "ticket_index.append-000000-part001.faiss"
+        else:
+            match = re.match(r"^(ticket_index\.append-.+?)(?:-part(\d{3}))?\.faiss$", current_path.name)
+            if not match:
+                raise RuntimeError(f"Nome segmento FAISS non riconosciuto: {current_path.name}")
+            base, part = match.groups()
+            next_name = f"{base}-part{int(part or 0) + 1:03d}.faiss"
+        return current_path.with_name(next_name)
 
     def _write_index_atomically(self, index: faiss.Index) -> None:
         self.faiss_dir.mkdir(parents=True, exist_ok=True)

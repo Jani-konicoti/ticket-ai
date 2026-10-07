@@ -1205,7 +1205,7 @@ function App() {
               <MessageSquareText size={19} />
               <div>
                 <h2>Query ticket</h2>
-                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body.</p>
+                <p>La query deve restituire: id, thread_id, staff_id, user_id, poster, created, title, body, entry_type.</p>
               </div>
             </div>
             <textarea

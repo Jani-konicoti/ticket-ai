@@ -79,6 +79,14 @@ IGNORE_TITLE_PATTERNS = (
 )
 
 
+def _shard_sort_key(path: Path) -> tuple[str, int]:
+    match = re.match(r"^ticket_index\.append-(.+?)(?:-part(\d{3}))?\.faiss$", path.name)
+    if not match:
+        return path.name, 0
+    group, part = match.groups()
+    return group, int(part or 0)
+
+
 def _clean_text(value: Any) -> str:
     if value is None or pd.isna(value):
         return ""
@@ -187,7 +195,10 @@ class TicketStore:
             missing_names = ", ".join(str(path) for path in missing)
             raise FileNotFoundError(f"File FAISS mancanti: {missing_names}")
 
-        self.index_paths = [self.index_path, *sorted(faiss_dir.glob("ticket_index.append-*.faiss"))]
+        self.index_paths = [
+            self.index_path,
+            *sorted(faiss_dir.glob("ticket_index.append-*.faiss"), key=_shard_sort_key),
+        ]
         self.indexes = [faiss.read_index(str(path)) for path in self.index_paths]
         self.index = self.indexes[0]
         self.ticket_ids = self._read_ticket_ids()

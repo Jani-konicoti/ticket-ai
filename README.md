@@ -135,10 +135,11 @@ Le operazioni di rebuild/append usano sempre `text-embedding-3-large`.
 La query deve restituire queste colonne, in questo ordine:
 
 ```sql
-id, thread_id, staff_id, user_id, poster, created, title, body
+id, thread_id, staff_id, user_id, poster, created, title, body, entry_type
 ```
 
 La rebuild usa una cartella temporanea `FAISS_build/` e pubblica i file finali in `FAISS/` solo a completamento.
+Gli indici vengono suddivisi in segmenti da massimo 20.000 vettori per evitare picchi di memoria durante rebuild e append.
 
 ## Cache browser
 
