@@ -51,6 +51,9 @@ class ManualDocument(BaseModel):
     page_count: int = 0
     chunk_count: int = 0
     image_count: int = 0
+    progress_step: str = ""
+    progress_current: int = 0
+    progress_total: int = 0
     all_departments: bool = True
     department_ids: list[int] = Field(default_factory=list)
     created_by: str

@@ -1753,6 +1753,49 @@ select {
   font-weight: 700;
 }
 
+.manual-progress {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.manual-progress-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #46556a;
+  font-size: 0.82rem;
+}
+
+.manual-progress-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-progress-copy strong {
+  flex: 0 0 auto;
+  color: #283548;
+  font-variant-numeric: tabular-nums;
+}
+
+.manual-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #dfe7ef;
+}
+
+.manual-progress-track span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+  border-radius: inherit;
+  background: #d61f2a;
+  transition: width 240ms ease;
+}
+
 .manual-error {
   margin: 10px 0 0;
   color: #a2252d;

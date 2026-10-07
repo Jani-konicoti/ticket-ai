@@ -23,7 +23,7 @@ from .models import ManualHit
 from .openai_service import OpenAIService
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 ACTIVE_STATUSES = {"queued", "processing"}
 
 
@@ -52,6 +52,9 @@ class ManualRegistry:
                     page_count INTEGER NOT NULL DEFAULT 0,
                     chunk_count INTEGER NOT NULL DEFAULT 0,
                     image_count INTEGER NOT NULL DEFAULT 0,
+                    progress_step TEXT NOT NULL DEFAULT '',
+                    progress_current INTEGER NOT NULL DEFAULT 0,
+                    progress_total INTEGER NOT NULL DEFAULT 0,
                     all_departments INTEGER NOT NULL DEFAULT 1,
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -59,6 +62,14 @@ class ManualRegistry:
                 )
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(manuals)").fetchall()}
+            for name, definition in (
+                ("progress_step", "TEXT NOT NULL DEFAULT ''"),
+                ("progress_current", "INTEGER NOT NULL DEFAULT 0"),
+                ("progress_total", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE manuals ADD COLUMN {name} {definition}")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS manual_departments (
@@ -72,7 +83,8 @@ class ManualRegistry:
             connection.execute(
                 """
                 UPDATE manuals
-                SET status = 'failed', error = 'Elaborazione interrotta dal riavvio del backend.', updated_at = ?
+                SET status = 'failed', error = 'Elaborazione interrotta dal riavvio del backend.',
+                    progress_step = 'Interrotto', updated_at = ?
                 WHERE status IN ('queued', 'processing')
                 """,
                 (self._now(),),
@@ -138,7 +150,10 @@ class ManualRegistry:
         return bool(set(manual["department_ids"]) & allowed_department_ids)
 
     def update_status(self, manual_id: str, status: str, **fields: object) -> None:
-        allowed_fields = {"error", "page_count", "chunk_count", "image_count"}
+        allowed_fields = {
+            "error", "page_count", "chunk_count", "image_count",
+            "progress_step", "progress_current", "progress_total",
+        }
         updates = ["status = ?", "updated_at = ?"]
         values: list[object] = [status, self._now()]
         for key, value in fields.items():
@@ -218,7 +233,9 @@ class ManualIndexManager:
             if manual_id in self._active:
                 raise ValueError("Questo manuale e' gia' in elaborazione.")
             self._active.add(manual_id)
-        self.registry.update_status(manual_id, "queued", error=None)
+        self.registry.update_status(
+            manual_id, "queued", error=None, progress_step="In coda", progress_current=0, progress_total=0
+        )
         threading.Thread(target=self._run, args=(manual_id,), daemon=True).start()
 
     def _run(self, manual_id: str) -> None:
@@ -242,6 +259,9 @@ class ManualIndexManager:
                             page_count=previous["page_count"],
                             chunk_count=previous["chunk_count"],
                             image_count=previous["image_count"],
+                            progress_step="Indice precedente ripristinato",
+                            progress_current=previous["progress_total"],
+                            progress_total=previous["progress_total"],
                         )
                         logger.exception("Manual reindex failed; previous index restored for %s", manual_id)
                         return
@@ -251,7 +271,9 @@ class ManualIndexManager:
                         shutil.rmtree(backup, ignore_errors=True)
         except Exception as exc:
             logger.exception("Manual indexing failed for %s", manual_id)
-            self.registry.update_status(manual_id, "failed", error=str(exc)[:2000])
+            self.registry.update_status(
+                manual_id, "failed", error=str(exc)[:2000], progress_step="Errore"
+            )
         finally:
             with self._lock:
                 self._active.discard(manual_id)
@@ -270,7 +292,15 @@ class ManualIndexManager:
             raise RuntimeError("OPENAI_API_KEY non configurata.")
 
         self.registry.update_status(
-            manual_id, "processing", error=None, page_count=0, chunk_count=0, image_count=0
+            manual_id,
+            "processing",
+            error=None,
+            page_count=0,
+            chunk_count=0,
+            image_count=0,
+            progress_step="Apertura PDF",
+            progress_current=0,
+            progress_total=0,
         )
         self._clear_generated_files(manual_dir)
         pages_dir = manual_dir / "pages"
@@ -284,8 +314,24 @@ class ManualIndexManager:
         try:
             if document.page_count > 1500:
                 raise ValueError("Il PDF supera il limite di 1500 pagine.")
+            total_pages = document.page_count
+            logger.info("Manual %s: extraction started, %s pages", manual_id, total_pages)
+            self.registry.update_status(
+                manual_id,
+                "processing",
+                progress_step="Estrazione testo e OCR",
+                progress_current=0,
+                progress_total=total_pages,
+            )
             for page_index, page in enumerate(document):
                 page_number = page_index + 1
+                self.registry.update_status(
+                    manual_id,
+                    "processing",
+                    progress_step=f"Estrazione e OCR pagina {page_number}",
+                    progress_current=page_index,
+                    progress_total=total_pages,
+                )
                 page_image = self._render_page(page, pages_dir / f"page-{page_number:04d}.webp")
                 text = page.get_text("text").strip()
                 page_image_paths: list[str] = []
@@ -318,19 +364,37 @@ class ManualIndexManager:
                     if page_ocr and page_ocr not in text:
                         ocr_parts.append(page_ocr)
                 combined = self._normalize_text("\n".join([text, *ocr_parts]))
-                if not combined:
-                    continue
-                for chunk_index, chunk in enumerate(self._chunks(combined), start=1):
-                    metadata.append(
-                        {
-                            "manual_id": manual_id,
-                            "manual_title": manual["title"],
-                            "page": page_number,
-                            "chunk": chunk_index,
-                            "text": chunk,
-                            "page_image": f"pages/page-{page_number:04d}.webp",
-                            "images": page_image_paths,
-                        }
+                if combined:
+                    for chunk_index, chunk in enumerate(self._chunks(combined), start=1):
+                        metadata.append(
+                            {
+                                "manual_id": manual_id,
+                                "manual_title": manual["title"],
+                                "page": page_number,
+                                "chunk": chunk_index,
+                                "text": chunk,
+                                "page_image": f"pages/page-{page_number:04d}.webp",
+                                "images": page_image_paths,
+                            }
+                        )
+                self.registry.update_status(
+                    manual_id,
+                    "processing",
+                    page_count=page_number,
+                    chunk_count=len(metadata),
+                    image_count=image_count,
+                    progress_step="Estrazione testo e OCR",
+                    progress_current=page_number,
+                    progress_total=total_pages,
+                )
+                if page_number == 1 or page_number % 5 == 0 or page_number == total_pages:
+                    logger.info(
+                        "Manual %s: extracted page %s/%s, %s chunks, %s images",
+                        manual_id,
+                        page_number,
+                        total_pages,
+                        len(metadata),
+                        image_count,
                     )
         finally:
             document.close()
@@ -339,9 +403,34 @@ class ManualIndexManager:
             raise ValueError("Non e' stato possibile estrarre testo o immagini leggibili dal PDF.")
 
         vectors: list[list[float]] = []
+        logger.info("Manual %s: embedding started, %s chunks", manual_id, len(metadata))
+        self.registry.update_status(
+            manual_id,
+            "processing",
+            progress_step="Creazione embedding OpenAI",
+            progress_current=0,
+            progress_total=len(metadata),
+        )
         for start in range(0, len(metadata), 50):
             texts = [item["text"] for item in metadata[start : start + 50]]
             vectors.extend(self.openai_service.embed_many(texts, self.embedding_model))
+            completed = min(start + len(texts), len(metadata))
+            self.registry.update_status(
+                manual_id,
+                "processing",
+                chunk_count=len(metadata),
+                progress_step="Creazione embedding OpenAI",
+                progress_current=completed,
+                progress_total=len(metadata),
+            )
+            logger.info("Manual %s: embedded %s/%s chunks", manual_id, completed, len(metadata))
+        self.registry.update_status(
+            manual_id,
+            "processing",
+            progress_step="Scrittura indice FAISS",
+            progress_current=0,
+            progress_total=1,
+        )
         matrix = np.asarray(vectors, dtype="float32")
         index = faiss.IndexFlatL2(matrix.shape[1])
         index.add(matrix)
@@ -356,9 +445,19 @@ class ManualIndexManager:
             manual_id,
             "ready",
             error=None,
-            page_count=max(item["page"] for item in metadata),
+            page_count=total_pages,
             chunk_count=len(metadata),
             image_count=image_count,
+            progress_step="Completato",
+            progress_current=1,
+            progress_total=1,
+        )
+        logger.info(
+            "Manual %s: completed, %s pages, %s chunks, %s images",
+            manual_id,
+            total_pages,
+            len(metadata),
+            image_count,
         )
 
     @staticmethod

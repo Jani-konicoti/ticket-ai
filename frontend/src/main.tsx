@@ -103,6 +103,9 @@ type ManualDocument = {
   page_count: number;
   chunk_count: number;
   image_count: number;
+  progress_step: string;
+  progress_current: number;
+  progress_total: number;
   all_departments: boolean;
   department_ids: number[];
   created_by: string;
@@ -233,6 +236,12 @@ const CHAT_HISTORY_KEY_PREFIX = "ticket-ai-chat-history";
 
 function chatHistoryKey(userId: number) {
   return `${CHAT_HISTORY_KEY_PREFIX}-${userId}`;
+}
+
+function manualProgressPercent(manual: ManualDocument) {
+  if (manual.status === "ready") return 100;
+  if (!manual.progress_total) return 0;
+  return Math.min(100, Math.round((manual.progress_current / manual.progress_total) * 100));
 }
 
 const exampleQuestions = [
@@ -1645,6 +1654,21 @@ function App() {
                         <span>{manual.image_count.toLocaleString("it-IT")} immagini</span>
                         <span>Aggiornato {new Date(manual.updated_at).toLocaleString("it-IT")}</span>
                       </div>
+                      {["queued", "processing"].includes(manual.status) ? (
+                        <div className="manual-progress">
+                          <div className="manual-progress-copy">
+                            <span>{manual.progress_step || "Preparazione"}</span>
+                            <strong>
+                              {manual.progress_total
+                                ? `${manual.progress_current.toLocaleString("it-IT")} / ${manual.progress_total.toLocaleString("it-IT")} (${manualProgressPercent(manual)}%)`
+                                : "In attesa"}
+                            </strong>
+                          </div>
+                          <div className="manual-progress-track" aria-label={`Avanzamento ${manualProgressPercent(manual)}%`}>
+                            <span style={{ width: `${manualProgressPercent(manual)}%` }} />
+                          </div>
+                        </div>
+                      ) : null}
                       {manual.error ? <p className="manual-error">{manual.error}</p> : null}
                       {session.user.role === "admin" ? (
                         <DepartmentPermissions
