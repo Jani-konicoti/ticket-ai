@@ -69,12 +69,14 @@ Cartelle persistenti usate dal Compose:
 
 - `./FAISS` -> indice FAISS, CSV e ids.
 - `./data` -> SQLite locale con utenti, sessioni e configurazione SSH/DB/query.
+- `./manuals` -> PDF originali, pagine renderizzate, immagini e indici FAISS dei manuali.
 
 Nel container vengono impostati:
 
 ```env
 FAISS_DIR=/app/FAISS
 APP_DATA_DIR=/app/data
+MANUALS_DIR=/app/manuals
 ALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
 ```
 
@@ -98,6 +100,8 @@ OPENAI_CHAT_MODEL=gpt-4.1-mini
 OPENAI_EMBEDDING_MODEL=auto
 FAISS_DIR=FAISS
 APP_DATA_DIR=backend
+MANUALS_DIR=manuals
+MANUAL_MAX_UPLOAD_MB=100
 INDEX_APPEND_SCHEDULE_HOUR=2
 ANALYSIS_SCHEDULE_HOUR=4
 INDEX_MAX_BATCH_SIZE=30
@@ -123,6 +127,8 @@ Puoi comunque impostare un modello esplicito nel `.env` se hai creato l'indice c
 - `GET/POST /api/users` gestisce utenti, solo per admin.
 - `GET /api/filters` restituisce reparti e fonti visibili all'utente autenticato.
 - `POST /api/ask` cerca ticket simili e genera una risposta con citazioni ai ticket.
+- `GET/POST /api/manuals` elenca o carica i manuali accessibili; upload e gestione sono riservati agli admin.
+- `POST /api/manuals/{id}/reindex` ricrea testo, OCR, immagini e indice del singolo manuale.
 - `GET /api/analysis/recent-problems` raggruppa i ticket recenti per problema noto e produce una sintesi opzionale con OpenAI.
 - `GET/POST /api/config` legge e salva configurazione SSH/DB/query in SQLite locale.
 - `POST /api/index/rebuild` ricostruisce FAISS da zero partendo da una data.
@@ -142,6 +148,8 @@ id, thread_id, staff_id, user_id, poster, created, title, body, entry_type, tick
 ```
 
 I filtri per reparto e fonte vengono applicati lato backend sia alla chat sia ai problemi noti. Per gli utenti limitati, `Tutti` indica tutti i reparti autorizzati e non l'intero indice.
+
+I manuali hanno permessi di reparto indipendenti. L'ingestione estrae il testo PDF, esegue OCR italiano/inglese sulle pagine scansionate e sugli screenshot, salva anteprime WebP e crea un indice FAISS separato per documento. I job vengono serializzati per contenere l'uso di RAM; se una reindicizzazione fallisce, l'indice precedente viene ripristinato.
 
 La rebuild usa una cartella temporanea `FAISS_build/` e pubblica i file finali in `FAISS/` solo a completamento.
 Gli indici vengono suddivisi in segmenti da massimo 20.000 vettori per evitare picchi di memoria durante rebuild e append.

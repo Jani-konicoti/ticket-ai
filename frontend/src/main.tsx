@@ -4,6 +4,7 @@ import {
   Activity,
   AlertCircle,
   BarChart3,
+  BookOpen,
   Building2,
   CalendarClock,
   CheckCircle2,
@@ -14,6 +15,8 @@ import {
   Database,
   ExternalLink,
   Filter,
+  FileText,
+  FileUp,
   History,
   KeyRound,
   Layers,
@@ -72,6 +75,39 @@ type AskResponse = {
   hits: Hit[];
   model: string;
   embedding_model: string;
+  ticket_answer?: string | null;
+  manual_answer?: string | null;
+  manual_hits: ManualHit[];
+  merged: boolean;
+};
+
+type ManualHit = {
+  rank: number;
+  score: number;
+  manual_id: string;
+  manual_title: string;
+  page: number;
+  excerpt: string;
+  body: string;
+  image_urls: string[];
+  page_image_url?: string | null;
+  pdf_url: string;
+};
+
+type ManualDocument = {
+  id: string;
+  title: string;
+  filename: string;
+  status: "queued" | "processing" | "ready" | "failed";
+  error?: string | null;
+  page_count: number;
+  chunk_count: number;
+  image_count: number;
+  all_departments: boolean;
+  department_ids: number[];
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 };
 
 type ProblemGroup = {
@@ -186,6 +222,8 @@ type ChatHistoryItem = {
   top_k: number;
   department_id: number | null;
   ticket_source: string;
+  include_manuals?: boolean;
+  merge_answers?: boolean;
   response: AskResponse;
 };
 
@@ -295,7 +333,7 @@ function SummaryMarkdown({ text }: { text: string }) {
 function App() {
   const [session, setSession] = useState<Session | null>(() => readJson<Session | null>(SESSION_KEY, null));
   const [authChecking, setAuthChecking] = useState(Boolean(readJson<Session | null>(SESSION_KEY, null)));
-  const [view, setView] = useState<"ask" | "analysis" | "config" | "users">("ask");
+  const [view, setView] = useState<"ask" | "analysis" | "manuals" | "config" | "users">("ask");
   const [analysisTab, setAnalysisTab] = useState<"priorities" | "recurring" | "summary">("priorities");
   const [health, setHealth] = useState<Health | null>(null);
   const [question, setQuestion] = useState("");
@@ -303,6 +341,8 @@ function App() {
   const [filterOptions, setFilterOptions] = useState<FilterOptions>({ departments: [], sources: [] });
   const [chatDepartmentId, setChatDepartmentId] = useState<number | null>(null);
   const [chatSource, setChatSource] = useState("");
+  const [includeManuals, setIncludeManuals] = useState(false);
+  const [mergeAnswers, setMergeAnswers] = useState(false);
   const [askLoading, setAskLoading] = useState(false);
   const [askError, setAskError] = useState("");
   const [askCacheHit, setAskCacheHit] = useState(false);
@@ -337,6 +377,14 @@ function App() {
   const [latestLocalDate, setLatestLocalDate] = useState<string | null>(null);
   const [rebuildFromDate, setRebuildFromDate] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
+  const [manuals, setManuals] = useState<ManualDocument[]>([]);
+  const [manualsLoading, setManualsLoading] = useState(false);
+  const [manualsError, setManualsError] = useState("");
+  const [manualsMessage, setManualsMessage] = useState("");
+  const [manualFile, setManualFile] = useState<File | null>(null);
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualAllDepartments, setManualAllDepartments] = useState(true);
+  const [manualDepartmentIds, setManualDepartmentIds] = useState<number[]>([]);
 
   useEffect(() => {
     if (!session) {
@@ -382,7 +430,16 @@ function App() {
     if (view === "users" && session.user.role === "admin" && !users.length && !usersLoading) {
       loadUsers();
     }
+    if (view === "manuals" && !manualsLoading) {
+      loadManuals();
+    }
   }, [view, session?.token]);
+
+  useEffect(() => {
+    if (!session || !manuals.some((manual) => ["queued", "processing"].includes(manual.status))) return;
+    const timer = window.setInterval(loadManuals, 2500);
+    return () => window.clearInterval(timer);
+  }, [session?.token, manuals.map((manual) => `${manual.id}:${manual.status}`).join("|")]);
 
   useEffect(() => {
     if (!job || !["queued", "running"].includes(job.status)) return;
@@ -487,7 +544,9 @@ function App() {
         item.question.trim().toLowerCase() === normalizedQuestion.toLowerCase() &&
         item.top_k === topK &&
         (item.department_id ?? null) === chatDepartmentId &&
-        (item.ticket_source || "") === chatSource
+        (item.ticket_source || "") === chatSource &&
+        Boolean(item.include_manuals) === includeManuals &&
+        Boolean(item.merge_answers) === (includeManuals && mergeAnswers)
     );
     if (cached) {
       setAskCacheHit(true);
@@ -509,7 +568,9 @@ function App() {
           question: normalizedQuestion,
           top_k: topK,
           department_id: chatDepartmentId,
-          ticket_source: chatSource || null
+          ticket_source: chatSource || null,
+          include_manuals: includeManuals,
+          merge_answers: includeManuals && mergeAnswers
         })
       });
       const payload = await response.json();
@@ -523,6 +584,8 @@ function App() {
           top_k: topK,
           department_id: chatDepartmentId,
           ticket_source: chatSource,
+          include_manuals: includeManuals,
+          merge_answers: includeManuals && mergeAnswers,
           response: payload
         },
         ...chatHistory.filter((item) => item.question.trim().toLowerCase() !== normalizedQuestion.toLowerCase()).slice(0, 24)
@@ -763,6 +826,124 @@ function App() {
     window.localStorage.removeItem(SESSION_KEY);
   }
 
+  async function loadManuals() {
+    setManualsLoading(true);
+    try {
+      const response = await fetch("/api/manuals", { headers: authHeaders(session) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore caricamento manuali");
+      setManuals(payload);
+      setManualsError("");
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setManualsLoading(false);
+    }
+  }
+
+  async function uploadManual(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!manualFile) return;
+    const form = event.currentTarget;
+    setManualsLoading(true);
+    setManualsError("");
+    setManualsMessage("");
+    const body = new FormData();
+    body.append("file", manualFile);
+    body.append("title", manualTitle);
+    body.append("all_departments", String(manualAllDepartments));
+    body.append("department_ids", JSON.stringify(manualDepartmentIds));
+    try {
+      const response = await fetch("/api/manuals", { method: "POST", headers: authHeaders(session), body });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore caricamento manuale");
+      setManuals((current) => [...current.filter((item) => item.id !== payload.id), payload]);
+      setManualFile(null);
+      setManualTitle("");
+      setManualAllDepartments(true);
+      setManualDepartmentIds([]);
+      form.reset();
+      setManualsMessage("PDF caricato. Estrazione, OCR e indicizzazione sono partiti.");
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setManualsLoading(false);
+    }
+  }
+
+  async function reindexManual(manualId: string) {
+    setManualsError("");
+    setManualsMessage("");
+    try {
+      const response = await fetch(`/api/manuals/${manualId}/reindex`, {
+        method: "POST",
+        headers: authHeaders(session)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore reindicizzazione manuale");
+      setManuals((current) => current.map((manual) => (manual.id === manualId ? payload : manual)));
+      setManualsMessage("Reindicizzazione avviata.");
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function deleteManual(manual: ManualDocument) {
+    if (!window.confirm(`Eliminare il manuale "${manual.title}" e il relativo indice?`)) return;
+    setManualsError("");
+    try {
+      const response = await fetch(`/api/manuals/${manual.id}`, {
+        method: "DELETE",
+        headers: authHeaders(session)
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore eliminazione manuale");
+      setManuals((current) => current.filter((item) => item.id !== manual.id));
+      setManualsMessage("Manuale eliminato.");
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function updateManualPermissions(
+    manual: ManualDocument,
+    allDepartments: boolean,
+    departmentIds: number[]
+  ) {
+    setManualsError("");
+    try {
+      const response = await fetch(`/api/manuals/${manual.id}/departments`, {
+        method: "PUT",
+        headers: jsonAuthHeaders(session),
+        body: JSON.stringify({ all_departments: allDepartments, department_ids: departmentIds })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Errore aggiornamento permessi");
+      setManuals((current) => current.map((item) => (item.id === manual.id ? payload : item)));
+      setManualsMessage(`Permessi di ${manual.title} aggiornati.`);
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+      loadManuals();
+    }
+  }
+
+  async function openProtectedFile(path: string) {
+    setManualsError("");
+    try {
+      const response = await fetch(path, { headers: authHeaders(session) });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || "File non disponibile");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const page = new URL(path, window.location.origin).searchParams.get("page");
+      window.open(`${url}${page ? `#page=${page}` : ""}`, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (error) {
+      setManualsError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function loadUsers() {
     setUsersLoading(true);
     setUsersError("");
@@ -827,6 +1008,8 @@ function App() {
     setTopK(item.top_k);
     setChatDepartmentId(item.department_id ?? null);
     setChatSource(item.ticket_source || "");
+    setIncludeManuals(Boolean(item.include_manuals));
+    setMergeAnswers(Boolean(item.merge_answers));
     setAnswer(item.response);
     setAskCacheHit(true);
     setHitPage(1);
@@ -891,6 +1074,10 @@ function App() {
           <BarChart3 size={18} />
           Problemi noti
         </button>
+        <button className={view === "manuals" ? "active" : ""} onClick={() => setView("manuals")}>
+          <BookOpen size={18} />
+          Manuali
+        </button>
         {session.user.role === "admin" ? (
           <>
             <button className={view === "config" ? "active" : ""} onClick={() => setView("config")}>
@@ -940,6 +1127,23 @@ function App() {
                   {filterOptions.sources.map((source) => <option key={source} value={source}>{source}</option>)}
                 </select>
               </label>
+              <label className="checkbox-option source-toggle">
+                <input
+                  type="checkbox"
+                  checked={includeManuals}
+                  onChange={(event) => {
+                    setIncludeManuals(event.target.checked);
+                    if (!event.target.checked) setMergeAnswers(false);
+                  }}
+                />
+                <span>Anche dai manuali</span>
+              </label>
+              {includeManuals ? (
+                <label className="checkbox-option source-toggle">
+                  <input type="checkbox" checked={mergeAnswers} onChange={(event) => setMergeAnswers(event.target.checked)} />
+                  <span>Unisci risposte</span>
+                </label>
+              ) : null}
             </div>
             <div className="controls-row">
               <label className="range-control">
@@ -991,16 +1195,27 @@ function App() {
 
           {answer ? (
             <div className="search-results">
-              <section className="answer-panel elevated-panel">
-                <div className="panel-title">
-                  <MessageSquareText size={19} />
-                  <h2>Risposta suggerita</h2>
-                </div>
-                <p className="answer-text">{answer.answer}</p>
-                <div className="model-line">
-                  Modello: {answer.model} - Embedding: {answer.embedding_model}
-                </div>
-              </section>
+              <div className="answer-stack">
+                <section className="answer-panel elevated-panel">
+                  <div className="panel-title">
+                    <MessageSquareText size={19} />
+                    <h2>{answer.merged ? "Risposta unificata" : "Risposta dai ticket"}</h2>
+                  </div>
+                  <p className="answer-text">{answer.ticket_answer || answer.answer}</p>
+                  <div className="model-line">
+                    Modello: {answer.model} - Embedding: {answer.embedding_model}
+                  </div>
+                </section>
+                {!answer.merged && answer.manual_answer ? (
+                  <section className="answer-panel manual-answer-panel elevated-panel">
+                    <div className="panel-title">
+                      <BookOpen size={19} />
+                      <h2>Risposta dai manuali</h2>
+                    </div>
+                    <p className="answer-text">{answer.manual_answer}</p>
+                  </section>
+                ) : null}
+              </div>
 
               <section className="hits-panel elevated-panel">
                 <div className="list-header">
@@ -1057,6 +1272,43 @@ function App() {
                   ))}
                 </div>
               </section>
+              {(answer.manual_hits || []).length ? (
+                <section className="hits-panel manual-hits-panel elevated-panel">
+                  <div className="list-header">
+                    <div className="panel-title">
+                      <BookOpen size={19} />
+                      <div>
+                        <h2>Pagine dei manuali</h2>
+                        <p>{answer.manual_hits.length} riferimenti</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="manual-hit-grid">
+                    {answer.manual_hits.map((hit) => (
+                      <article className="manual-hit" key={`${hit.manual_id}-${hit.page}-${hit.rank}`}>
+                        {hit.page_image_url ? (
+                          <AuthenticatedImage
+                            path={hit.page_image_url}
+                            session={session}
+                            alt={`${hit.manual_title}, pagina ${hit.page}`}
+                          />
+                        ) : null}
+                        <div className="manual-hit-copy">
+                          <div className="hit-topline">
+                            <strong>{hit.manual_title}</strong>
+                            <span>pagina {hit.page}</span>
+                          </div>
+                          <p>{hit.excerpt}</p>
+                          <button className="secondary-button" type="button" onClick={() => openProtectedFile(hit.pdf_url)}>
+                            <FileText size={17} />
+                            Apri PDF
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
             </div>
           ) : null}
         </section>
@@ -1293,6 +1545,160 @@ function App() {
             <div className="empty-state">Nessun dato caricato.</div>
           )}
         </section>
+      ) : view === "manuals" ? (
+        <section className="workspace fade-in">
+          <div className="analysis-toolbar elevated-panel">
+            <div className="toolbar-copy">
+              <h2>Manuali</h2>
+              <p>Documentazione indicizzata, pagine e screenshot consultabili dalla ricerca assistita.</p>
+            </div>
+            <div className="toolbar-actions">
+              <span className="soft-chip">{manuals.filter((manual) => manual.status === "ready").length} pronti</span>
+              <button className="icon-button" onClick={loadManuals} disabled={manualsLoading} aria-label="Ricarica manuali">
+                {manualsLoading ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
+              </button>
+            </div>
+          </div>
+
+          {manualsError ? <ErrorBlock message={manualsError} /> : null}
+          {manualsMessage ? <div className="success-block">{manualsMessage}</div> : null}
+
+          {session.user.role === "admin" ? (
+            <form className="manual-upload elevated-panel" onSubmit={uploadManual}>
+              <div className="panel-title">
+                <FileUp size={19} />
+                <div>
+                  <h2>Carica PDF</h2>
+                  <p>Il testo, le pagine e gli screenshot vengono elaborati in background.</p>
+                </div>
+              </div>
+              <div className="manual-upload-fields">
+                <label className="field file-field">
+                  <span>File PDF</span>
+                  <input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    required
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      setManualFile(file);
+                      if (file && !manualTitle) setManualTitle(file.name.replace(/\.pdf$/i, ""));
+                    }}
+                  />
+                </label>
+                <Field label="Titolo" value={manualTitle} onChange={setManualTitle} />
+              </div>
+              <DepartmentPermissions
+                allDepartments={manualAllDepartments}
+                departments={filterOptions.departments}
+                selectedIds={manualDepartmentIds}
+                onChange={(allDepartments, departmentIds) => {
+                  setManualAllDepartments(allDepartments);
+                  setManualDepartmentIds(departmentIds);
+                }}
+              />
+              <div className="controls-row">
+                <button className="primary-button" type="submit" disabled={manualsLoading || !manualFile}>
+                  {manualsLoading ? <Loader2 className="spin" size={18} /> : <FileUp size={18} />}
+                  Carica e indicizza
+                </button>
+              </div>
+            </form>
+          ) : null}
+
+          <section className="manual-list elevated-panel">
+            <div className="list-header">
+              <div className="panel-title">
+                <BookOpen size={19} />
+                <div>
+                  <h2>Documenti disponibili</h2>
+                  <p>{manuals.length} manuali visibili per i tuoi reparti</p>
+                </div>
+              </div>
+            </div>
+            {manuals.length ? (
+              <div className="manual-rows">
+                {manuals.map((manual) => (
+                  <article className="manual-row" key={manual.id}>
+                    <div className="manual-icon"><FileText size={22} /></div>
+                    <div className="manual-main">
+                      <div className="manual-title-row">
+                        <div>
+                          <h3>{manual.title}</h3>
+                          <p>{manual.filename} - caricato da {manual.created_by}</p>
+                        </div>
+                        <span className={`manual-status status-${manual.status}`}>
+                          {manual.status === "ready" ? "Pronto" : manual.status === "failed" ? "Errore" : "Elaborazione"}
+                        </span>
+                      </div>
+                      <div className="manual-stats">
+                        <span>{manual.page_count.toLocaleString("it-IT")} pagine</span>
+                        <span>{manual.chunk_count.toLocaleString("it-IT")} blocchi</span>
+                        <span>{manual.image_count.toLocaleString("it-IT")} immagini</span>
+                        <span>Aggiornato {new Date(manual.updated_at).toLocaleString("it-IT")}</span>
+                      </div>
+                      {manual.error ? <p className="manual-error">{manual.error}</p> : null}
+                      {session.user.role === "admin" ? (
+                        <DepartmentPermissions
+                          allDepartments={manual.all_departments}
+                          departments={filterOptions.departments}
+                          selectedIds={manual.department_ids}
+                          onChange={(allDepartments, departmentIds) =>
+                            updateManualPermissions(manual, allDepartments, departmentIds)
+                          }
+                        />
+                      ) : (
+                        <span className="permission-summary">
+                          {manual.all_departments ? "Tutti i reparti" : "Reparti autorizzati"}
+                        </span>
+                      )}
+                    </div>
+                    <div className="manual-actions">
+                      <button
+                        className="icon-button"
+                        type="button"
+                        disabled={manual.status !== "ready"}
+                        onClick={() => openProtectedFile(`/api/manuals/${manual.id}/pdf`)}
+                        aria-label={`Apri ${manual.title}`}
+                        title="Apri PDF"
+                      >
+                        <ExternalLink size={18} />
+                      </button>
+                      {session.user.role === "admin" ? (
+                        <>
+                          <button
+                            className="icon-button"
+                            type="button"
+                            disabled={["queued", "processing"].includes(manual.status)}
+                            onClick={() => reindexManual(manual.id)}
+                            aria-label={`Reindicizza ${manual.title}`}
+                            title="Reindicizza"
+                          >
+                            <RefreshCcw size={18} />
+                          </button>
+                          <button
+                            className="icon-button danger-icon"
+                            type="button"
+                            disabled={["queued", "processing"].includes(manual.status)}
+                            onClick={() => deleteManual(manual)}
+                            aria-label={`Elimina ${manual.title}`}
+                            title="Elimina"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : manualsLoading ? (
+              <LoadingPanel label="Carico i manuali..." />
+            ) : (
+              <div className="empty-state">Nessun manuale disponibile.</div>
+            )}
+          </section>
+        </section>
       ) : view === "config" && session.user.role === "admin" ? (
         <section className="workspace fade-in">
           <div className="analysis-toolbar elevated-panel">
@@ -1517,6 +1923,32 @@ function App() {
       )}
     </main>
   );
+}
+
+function AuthenticatedImage({ path, session, alt }: { path: string; session: Session; alt: string }) {
+  const [source, setSource] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    fetch(path, { headers: authHeaders(session) })
+      .then((response) => {
+        if (!response.ok) throw new Error("Immagine non disponibile");
+        return response.blob();
+      })
+      .then((blob) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSource(objectUrl);
+      })
+      .catch(() => setSource(""));
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path, session.token]);
+
+  return source ? <img className="manual-page-preview" src={source} alt={alt} loading="lazy" /> : <div className="image-placeholder" />;
 }
 
 function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {

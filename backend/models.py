@@ -7,6 +7,8 @@ class AskRequest(BaseModel):
     min_score: float | None = None
     department_id: int | None = None
     ticket_source: str | None = None
+    include_manuals: bool = False
+    merge_answers: bool = False
 
 
 class TicketHit(BaseModel):
@@ -27,11 +29,49 @@ class TicketHit(BaseModel):
     body: str
 
 
+class ManualHit(BaseModel):
+    rank: int
+    score: float
+    manual_id: str
+    manual_title: str
+    page: int
+    excerpt: str
+    body: str
+    image_urls: list[str] = Field(default_factory=list)
+    page_image_url: str | None = None
+    pdf_url: str
+
+
+class ManualDocument(BaseModel):
+    id: str
+    title: str
+    filename: str
+    status: str
+    error: str | None = None
+    page_count: int = 0
+    chunk_count: int = 0
+    image_count: int = 0
+    all_departments: bool = True
+    department_ids: list[int] = Field(default_factory=list)
+    created_by: str
+    created_at: str
+    updated_at: str
+
+
+class ManualPermissionsRequest(BaseModel):
+    all_departments: bool
+    department_ids: list[int] = Field(default_factory=list)
+
+
 class AskResponse(BaseModel):
     answer: str
     hits: list[TicketHit]
     model: str
     embedding_model: str
+    ticket_answer: str | None = None
+    manual_answer: str | None = None
+    manual_hits: list[ManualHit] = Field(default_factory=list)
+    merged: bool = False
 
 
 class LoginRequest(BaseModel):

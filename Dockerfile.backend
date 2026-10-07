@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgomp1 openssh-client \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 openssh-client tesseract-ocr tesseract-ocr-eng tesseract-ocr-ita \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

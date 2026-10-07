@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import csv
+import io
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import faiss
 import bcrypt
+import pymupdf as fitz
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 from backend.index_builder import (
     CSV_COLUMNS,
@@ -25,9 +29,81 @@ from backend.models import DatabaseConfig
 from backend.auth import AuthStore
 from backend.ticket_store import TicketStore
 from backend.osticket_auth import OsTicketAuthenticator
+from backend.manual_store import ManualIndexManager, ManualRegistry, ManualSearchStore
 
 
 class TicketStoreShardTests(unittest.TestCase):
+    def test_manual_index_preserves_pages_images_and_department_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ManualRegistry(root / "app.sqlite")
+            manual = registry.create("Manuale paghe", "paghe.pdf", "admin", False, [10])
+            manual_dir = root / "manuals" / manual["id"]
+            manual_dir.mkdir(parents=True)
+
+            image_buffer = io.BytesIO()
+            Image.new("RGB", (320, 120), "white").save(image_buffer, format="PNG")
+            document = fitz.open()
+            page = document.new_page()
+            page.insert_text((72, 72), "Procedura chiusura mensile: selezionare Conferma e verificare lo stato.")
+            page.insert_image(fitz.Rect(72, 100, 392, 220), stream=image_buffer.getvalue())
+            document.save(manual_dir / "original.pdf")
+            document.close()
+
+            class FakeOpenAI:
+                @staticmethod
+                def configured() -> bool:
+                    return True
+
+                @staticmethod
+                def embed_many(texts: list[str], _model: str) -> list[list[float]]:
+                    return [[float(len(text) % 5), 1.0] for text in texts]
+
+            manager = ManualIndexManager(
+                root / "manuals", registry, FakeOpenAI(), "test-model"  # type: ignore[arg-type]
+            )
+            with patch.object(ManualIndexManager, "_ocr", return_value="Pulsante conferma"):
+                manager._build(str(manual["id"]))
+
+            indexed = registry.get(str(manual["id"]))
+            self.assertEqual(indexed["status"], "ready")  # type: ignore[index]
+            self.assertEqual(indexed["page_count"], 1)  # type: ignore[index]
+            self.assertEqual(indexed["image_count"], 1)  # type: ignore[index]
+            self.assertTrue((manual_dir / "pages" / "page-0001.webp").exists())
+            self.assertEqual(registry.list({99}), [])
+            self.assertEqual(len(registry.list({10})), 1)
+
+            hits = ManualSearchStore(root / "manuals", registry).search([1.0, 1.0], 3, {10})
+            self.assertEqual(len(hits), 1)
+            self.assertEqual(hits[0].manual_title, "Manuale paghe")
+            self.assertEqual(hits[0].page, 1)
+            self.assertTrue(hits[0].image_urls)
+
+    def test_failed_manual_reindex_restores_previous_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ManualRegistry(root / "app.sqlite")
+            manual = registry.create("Manuale", "manuale.pdf", "admin", True, [])
+            manual_dir = root / "manuals" / manual["id"]
+            manual_dir.mkdir(parents=True)
+            (manual_dir / "original.pdf").write_bytes(b"%PDF-test")
+            (manual_dir / "manual.faiss").write_bytes(b"indice precedente")
+            (manual_dir / "metadata.json").write_text("[]", encoding="utf-8")
+            registry.update_status(str(manual["id"]), "ready", page_count=4, chunk_count=9, image_count=2)
+
+            manager = ManualIndexManager(root / "manuals", registry, object(), "model")  # type: ignore[arg-type]
+            with (
+                patch.object(manager, "_build", side_effect=RuntimeError("servizio non disponibile")),
+                patch("backend.manual_store.logger.exception"),
+            ):
+                manager._run(str(manual["id"]))
+
+            restored = registry.get(str(manual["id"]))
+            self.assertEqual(restored["status"], "ready")  # type: ignore[index]
+            self.assertEqual(restored["chunk_count"], 9)  # type: ignore[index]
+            self.assertIn("non riuscita", restored["error"])  # type: ignore[index]
+            self.assertEqual((manual_dir / "manual.faiss").read_bytes(), b"indice precedente")
+
     def test_search_merges_base_and_append_shards(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             faiss_dir = Path(temp_dir)

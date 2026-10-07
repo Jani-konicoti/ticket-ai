@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import gc
+import json
 import logging
+import shutil
 import threading
 import time
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Callable
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from .analysis_cache import ANALYSIS_PERIODS, AnalysisCacheStore
 from .auth import AuthStore, CurrentUser
@@ -22,6 +26,8 @@ from .models import (
     CreateUserRequest,
     JobResponse,
     LoginRequest,
+    ManualDocument,
+    ManualPermissionsRequest,
     RecentProblemsResponse,
     RebuildRequest,
     SaveConfigRequest,
@@ -30,6 +36,7 @@ from .models import (
     UserResponse,
 )
 from .openai_service import OpenAIService
+from .manual_store import ManualIndexManager, ManualRegistry, ManualSearchStore
 from .osticket_auth import OsTicketAuthenticator, PortalAuthUnavailable
 from .ticket_store import TicketStore
 
@@ -66,6 +73,35 @@ def get_openai_service() -> OpenAIService:
         api_key=settings.openai_api_key,
         chat_model=settings.openai_chat_model,
         embedding_model=settings.openai_embedding_model,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_manual_registry() -> ManualRegistry:
+    return ManualRegistry(get_settings().app_data_dir / "app_config.sqlite")
+
+
+@lru_cache(maxsize=1)
+def get_manual_search_store() -> ManualSearchStore:
+    return ManualSearchStore(get_settings().manuals_dir, get_manual_registry())
+
+
+@lru_cache(maxsize=1)
+def get_manual_index_manager() -> ManualIndexManager:
+    settings = get_settings()
+    if settings.openai_embedding_model.strip().lower() != "auto":
+        embedding_model = settings.openai_embedding_model
+    else:
+        try:
+            embedding_model = get_openai_service().resolve_embedding_model(get_store().stats.dimension)
+        except (FileNotFoundError, ValueError):
+            embedding_model = "text-embedding-3-large"
+    return ManualIndexManager(
+        settings.manuals_dir,
+        get_manual_registry(),
+        get_openai_service(),
+        embedding_model,
+        on_complete=get_manual_search_store().clear,
     )
 
 
@@ -350,6 +386,139 @@ def available_filters(current_user: CurrentUser = Depends(require_user)) -> dict
         raise HTTPException(status_code=409, detail=f"Indice FAISS non ancora creato: {exc}") from exc
 
 
+def _manual_for_user(manual_id: str, current_user: CurrentUser) -> dict[str, object]:
+    manual = get_manual_registry().get(manual_id)
+    if not manual:
+        raise HTTPException(status_code=404, detail="Manuale non trovato.")
+    if not get_manual_registry().can_access(manual, _departments_for_user(current_user)):
+        raise HTTPException(status_code=403, detail="Non sei autorizzato a consultare questo manuale.")
+    return manual
+
+
+@app.get("/api/manuals", response_model=list[ManualDocument])
+def list_manuals(current_user: CurrentUser = Depends(require_user)) -> list[ManualDocument]:
+    manuals = get_manual_registry().list(
+        _departments_for_user(current_user), include_unready=current_user.role == "admin"
+    )
+    return [ManualDocument(**manual) for manual in manuals]
+
+
+@app.post("/api/manuals", response_model=ManualDocument)
+async def upload_manual(
+    file: UploadFile = File(...),
+    title: str = Form(default=""),
+    all_departments: bool = Form(default=True),
+    department_ids: str = Form(default="[]"),
+    current_user: CurrentUser = Depends(require_admin),
+) -> ManualDocument:
+    filename = Path(file.filename or "manuale.pdf").name
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Carica un file PDF.")
+    try:
+        parsed_departments = [int(value) for value in json.loads(department_ids)]
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Elenco reparti non valido.") from exc
+    if not all_departments and not parsed_departments:
+        raise HTTPException(status_code=400, detail="Seleziona almeno un reparto oppure abilita Tutti.")
+
+    manual_title = title.strip() or Path(filename).stem
+    if len(manual_title) > 180:
+        raise HTTPException(status_code=400, detail="Il titolo non puo' superare 180 caratteri.")
+    manual = get_manual_registry().create(
+        manual_title, filename, current_user.username, all_departments, parsed_departments
+    )
+    manual_dir = get_settings().manuals_dir / manual["id"]
+    manual_dir.mkdir(parents=True, exist_ok=False)
+    pdf_path = manual_dir / "original.pdf"
+    size = 0
+    limit = get_settings().manual_max_upload_mb * 1024 * 1024
+    try:
+        with pdf_path.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError(f"Il PDF supera il limite di {get_settings().manual_max_upload_mb} MB.")
+                output.write(chunk)
+        with pdf_path.open("rb") as uploaded:
+            if uploaded.read(5) != b"%PDF-":
+                raise ValueError("Il file caricato non e' un PDF valido.")
+        get_manual_index_manager().start(str(manual["id"]))
+    except Exception as exc:
+        shutil.rmtree(manual_dir, ignore_errors=True)
+        get_manual_registry().delete(str(manual["id"]))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await file.close()
+    result = get_manual_registry().get(str(manual["id"]))
+    assert result is not None
+    return ManualDocument(**result)
+
+
+@app.post("/api/manuals/{manual_id}/reindex", response_model=ManualDocument)
+def reindex_manual(manual_id: str, _: CurrentUser = Depends(require_admin)) -> ManualDocument:
+    manual = get_manual_registry().get(manual_id)
+    if not manual:
+        raise HTTPException(status_code=404, detail="Manuale non trovato.")
+    try:
+        get_manual_index_manager().start(manual_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    result = get_manual_registry().get(manual_id)
+    assert result is not None
+    return ManualDocument(**result)
+
+
+@app.put("/api/manuals/{manual_id}/departments", response_model=ManualDocument)
+def update_manual_departments(
+    manual_id: str,
+    payload: ManualPermissionsRequest,
+    _: CurrentUser = Depends(require_admin),
+) -> ManualDocument:
+    try:
+        return ManualDocument(
+            **get_manual_registry().update_permissions(
+                manual_id, payload.all_departments, payload.department_ids
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/manuals/{manual_id}")
+def delete_manual(manual_id: str, _: CurrentUser = Depends(require_admin)) -> dict[str, bool]:
+    manual = get_manual_registry().get(manual_id)
+    if not manual:
+        raise HTTPException(status_code=404, detail="Manuale non trovato.")
+    if manual["status"] in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="Attendi la fine dell'elaborazione prima di eliminare il manuale.")
+    if not get_manual_registry().delete(manual_id):
+        raise HTTPException(status_code=404, detail="Manuale non trovato.")
+    shutil.rmtree(get_settings().manuals_dir / manual_id, ignore_errors=True)
+    get_manual_search_store().clear()
+    return {"ok": True}
+
+
+@app.get("/api/manuals/{manual_id}/pdf")
+def manual_pdf(manual_id: str, current_user: CurrentUser = Depends(require_user)) -> FileResponse:
+    manual = _manual_for_user(manual_id, current_user)
+    path = get_settings().manuals_dir / manual_id / "original.pdf"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="PDF non trovato.")
+    return FileResponse(path, media_type="application/pdf", filename=str(manual["filename"]), content_disposition_type="inline")
+
+
+@app.get("/api/manuals/{manual_id}/assets/{asset_path:path}")
+def manual_asset(
+    manual_id: str, asset_path: str, current_user: CurrentUser = Depends(require_user)
+) -> FileResponse:
+    _manual_for_user(manual_id, current_user)
+    manual_dir = (get_settings().manuals_dir / manual_id).resolve()
+    path = (manual_dir / asset_path).resolve()
+    if manual_dir not in path.parents or not path.is_file() or path.suffix.lower() != ".webp":
+        raise HTTPException(status_code=404, detail="Immagine non trovata.")
+    return FileResponse(path, media_type="image/webp")
+
+
 @app.get("/api/health")
 def health() -> dict[str, object]:
     active_job = job_manager.active()
@@ -547,28 +716,59 @@ def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) 
         openai_service = get_openai_service()
         embedding_model = openai_service.resolve_embedding_model(store.stats.dimension)
         embedding = openai_service.embed(payload.question, embedding_model)
+        department_ids = _departments_for_user(current_user, payload.department_id)
         raw_hits = store.search(
             embedding,
             top_k=payload.top_k,
-            department_ids=_departments_for_user(current_user, payload.department_id),
+            department_ids=department_ids,
             ticket_source=payload.ticket_source,
         )
         if payload.min_score is not None:
             raw_hits = [hit for hit in raw_hits if hit["score"] >= payload.min_score]
         hits = [TicketHit(**hit) for hit in raw_hits]
-        if not hits:
+        manual_hits = (
+            get_manual_search_store().search(embedding, payload.top_k, department_ids)
+            if payload.include_manuals
+            else []
+        )
+        if not hits and not manual_hits:
             return AskResponse(
-                answer="Non ho trovato ticket abbastanza simili con la soglia impostata.",
+                answer="Non ho trovato informazioni abbastanza simili nelle fonti disponibili.",
                 hits=[],
                 model=openai_service.chat_model,
                 embedding_model=embedding_model,
+                manual_hits=[],
+                merged=payload.merge_answers,
             )
-        answer = openai_service.answer_question(payload.question, hits)
+        if payload.include_manuals and payload.merge_answers:
+            answer = openai_service.answer_combined(payload.question, hits, manual_hits)
+            ticket_answer = None
+            manual_answer = None
+        elif payload.include_manuals:
+            ticket_answer = (
+                openai_service.answer_question(payload.question, hits)
+                if hits
+                else "Non ho trovato ticket pertinenti."
+            )
+            manual_answer = (
+                openai_service.answer_from_manuals(payload.question, manual_hits)
+                if manual_hits
+                else "Non ho trovato informazioni pertinenti nei manuali disponibili."
+            )
+            answer = ticket_answer
+        else:
+            answer = openai_service.answer_question(payload.question, hits)
+            ticket_answer = answer
+            manual_answer = None
         return AskResponse(
             answer=answer,
             hits=hits,
             model=openai_service.chat_model,
             embedding_model=embedding_model,
+            ticket_answer=ticket_answer,
+            manual_answer=manual_answer,
+            manual_hits=manual_hits,
+            merged=payload.include_manuals and payload.merge_answers,
         )
     except HTTPException:
         raise

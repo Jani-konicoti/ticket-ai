@@ -6,7 +6,7 @@ from typing import Any
 from openai import OpenAI
 import truststore
 
-from .models import TicketHit
+from .models import ManualHit, TicketHit
 
 
 truststore.inject_into_ssl()
@@ -45,6 +45,12 @@ class OpenAIService:
         response = self.client.embeddings.create(model=model, input=text)
         return response.data[0].embedding
 
+    def embed_many(self, texts: list[str], model: str) -> list[list[float]]:
+        if not self.client:
+            raise RuntimeError("OPENAI_API_KEY non configurata.")
+        response = self.client.embeddings.create(model=model, input=texts)
+        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+
     def answer_question(self, question: str, hits: list[TicketHit]) -> str:
         if not self.client:
             raise RuntimeError("OPENAI_API_KEY non configurata.")
@@ -69,6 +75,41 @@ class OpenAIService:
             f"Domanda dell'operatore:\n{question}\n\n"
             f"Ticket simili trovati:\n{context}\n\n"
             "Produci una risposta pratica: possibile causa, soluzione gia' vista, passaggi consigliati, ticket citati."
+        )
+        return self._generate_text(system, user)
+
+    def answer_from_manuals(self, question: str, hits: list[ManualHit]) -> str:
+        if not self.client:
+            raise RuntimeError("OPENAI_API_KEY non configurata.")
+        context = "\n\n".join(
+            f"[Manuale: {hit.manual_title} | pagina {hit.page}]\n{hit.body[:3200]}" for hit in hits
+        )
+        system = (
+            "Sei un assistente tecnico interno. Rispondi in italiano usando esclusivamente i manuali forniti. "
+            "Dai istruzioni operative, non inventare passaggi mancanti e cita ogni evidenza come "
+            "[Manuale: titolo, pagina N]. Se il materiale non basta, dichiaralo chiaramente."
+        )
+        user = f"Domanda:\n{question}\n\nEstratti dei manuali:\n{context}"
+        return self._generate_text(system, user)
+
+    def answer_combined(self, question: str, ticket_hits: list[TicketHit], manual_hits: list[ManualHit]) -> str:
+        if not self.client:
+            raise RuntimeError("OPENAI_API_KEY non configurata.")
+        ticket_context = "\n\n".join(
+            f"[Ticket #{hit.ticket_number or hit.id}]\nTitolo: {hit.title}\n{hit.body[:2200]}" for hit in ticket_hits
+        ) or "Nessun ticket pertinente."
+        manual_context = "\n\n".join(
+            f"[Manuale: {hit.manual_title} | pagina {hit.page}]\n{hit.body[:2600]}" for hit in manual_hits
+        ) or "Nessun manuale pertinente."
+        system = (
+            "Sei un assistente per supporto tecnico interno. Rispondi in italiano e integra casi reali e procedure. "
+            "Usa solo le fonti fornite. Distingui eventuali differenze tra comportamento osservato nei ticket e "
+            "procedura ufficiale. Cita i ticket come (Ticket #numero) e i manuali come "
+            "[Manuale: titolo, pagina N]. Se le fonti non bastano, dillo."
+        )
+        user = (
+            f"Domanda:\n{question}\n\nTICKET:\n{ticket_context}\n\nMANUALI:\n{manual_context}\n\n"
+            "Prepara una risposta unica con soluzione, passaggi e riferimenti."
         )
         return self._generate_text(system, user)
 

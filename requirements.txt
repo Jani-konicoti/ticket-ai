@@ -14,3 +14,7 @@ paramiko>=3.4.0,<4.0.0
 sshtunnel>=0.4.0
 tiktoken>=0.7.0
 truststore>=0.10.0
+PyMuPDF>=1.24.0
+Pillow>=10.3.0
+pytesseract>=0.3.13
+python-multipart>=0.0.9

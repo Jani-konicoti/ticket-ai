@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     openai_embedding_model: str = Field(default="auto", alias="OPENAI_EMBEDDING_MODEL")
     faiss_dir: Path = Field(default=Path("FAISS"), alias="FAISS_DIR")
     app_data_dir: Path = Field(default=Path("backend"), alias="APP_DATA_DIR")
+    manuals_dir: Path = Field(default=Path("manuals"), alias="MANUALS_DIR")
+    manual_max_upload_mb: int = Field(default=100, ge=1, le=500, alias="MANUAL_MAX_UPLOAD_MB")
     index_append_schedule_hour: int = Field(default=2, ge=0, le=23, alias="INDEX_APPEND_SCHEDULE_HOUR")
     analysis_schedule_hour: int = Field(default=4, ge=0, le=23, alias="ANALYSIS_SCHEDULE_HOUR")
     index_max_batch_size: int = Field(default=30, ge=1, le=500, alias="INDEX_MAX_BATCH_SIZE")

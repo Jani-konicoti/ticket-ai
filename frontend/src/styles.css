@@ -1561,3 +1561,251 @@ select {
   }
 }
 
+.source-toggle {
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid #d7e0ea;
+  border-radius: 8px;
+  background: #f7fafc;
+}
+
+.answer-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.manual-answer-panel {
+  border-left: 3px solid #287f78;
+}
+
+.manual-hits-panel {
+  grid-column: 1 / -1;
+}
+
+.manual-hit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.manual-hit {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(0, 1fr);
+  min-height: 230px;
+  overflow: hidden;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.manual-page-preview,
+.image-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 230px;
+  object-fit: cover;
+  object-position: top center;
+  background: #e7edf3;
+  border-right: 1px solid #dce4ee;
+}
+
+.manual-hit-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 14px;
+}
+
+.manual-hit-copy .hit-topline {
+  width: 100%;
+}
+
+.manual-hit-copy p {
+  display: -webkit-box;
+  margin: 12px 0;
+  overflow: hidden;
+  color: #465367;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
+.manual-hit-copy .secondary-button {
+  margin-top: auto;
+}
+
+.manual-upload,
+.manual-list {
+  padding: 16px;
+}
+
+.manual-upload-fields {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.file-field input {
+  min-height: 42px;
+  padding: 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.manual-rows {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.manual-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 13px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.manual-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  color: #d61f2a;
+  background: #fff2f3;
+  border: 1px solid #efc5c8;
+  border-radius: 8px;
+}
+
+.manual-main {
+  min-width: 0;
+}
+
+.manual-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manual-title-row h3,
+.manual-title-row p {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.manual-title-row h3 {
+  color: #172033;
+  font-size: 1rem;
+}
+
+.manual-title-row p {
+  margin-top: 4px;
+  color: #697386;
+  overflow-wrap: anywhere;
+}
+
+.manual-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #d4dce7;
+  border-radius: 999px;
+  color: #46556a;
+  background: #f1f5f9;
+  font-size: 0.74rem;
+  font-weight: 850;
+}
+
+.manual-status.status-ready {
+  color: #17645f;
+  border-color: #abd8d2;
+  background: #edf9f7;
+}
+
+.manual-status.status-failed {
+  color: #a2252d;
+  border-color: #efb8bc;
+  background: #fff3f4;
+}
+
+.manual-status.status-processing,
+.manual-status.status-queued {
+  color: #8a5a12;
+  border-color: #e5ce9d;
+  background: #fff8e8;
+}
+
+.manual-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
+  margin-top: 10px;
+  color: #5f6c7d;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.manual-error {
+  margin: 10px 0 0;
+  color: #a2252d;
+  line-height: 1.45;
+}
+
+.manual-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.danger-icon {
+  color: #b4232d;
+}
+
+@media (max-width: 900px) {
+  .manual-hit-grid,
+  .manual-upload-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .manual-actions {
+    grid-column: 2;
+  }
+}
+
+@media (max-width: 560px) {
+  .manual-hit {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-page-preview,
+  .image-placeholder {
+    max-height: 300px;
+    border-right: 0;
+    border-bottom: 1px solid #dce4ee;
+  }
+
+  .manual-row {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-icon,
+  .manual-actions {
+    grid-column: 1;
+  }
+
+  .manual-title-row {
+    flex-direction: column;
+  }
+}
+

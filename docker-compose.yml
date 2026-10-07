@@ -8,6 +8,7 @@ services:
     environment:
       FAISS_DIR: /app/FAISS
       APP_DATA_DIR: /app/data
+      MANUALS_DIR: /app/manuals
       ALLOWED_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
       INDEX_MAX_BATCH_SIZE: ${INDEX_MAX_BATCH_SIZE:-30}
       INDEX_SAVE_EVERY_BATCHES: ${INDEX_SAVE_EVERY_BATCHES:-40}
@@ -15,6 +16,7 @@ services:
     volumes:
       - ./FAISS:/app/FAISS
       - ./data:/app/data
+      - ./manuals:/app/manuals
     init: true
     cpus: ${BACKEND_CPUS:-1.5}
     mem_limit: ${BACKEND_MEMORY_LIMIT:-4g}
