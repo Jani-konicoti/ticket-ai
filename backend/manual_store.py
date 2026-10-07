@@ -337,8 +337,12 @@ class ManualIndexManager:
                 page_image_paths: list[str] = []
                 ocr_parts: list[str] = []
                 seen_xrefs: set[int] = set()
-                for image_number, image_info in enumerate(page.get_images(full=True), start=1):
-                    xref = int(image_info[0])
+                displayed_images = page.get_image_info(xrefs=True)
+                for image_number, image_info in enumerate(displayed_images, start=1):
+                    xref = int(image_info.get("xref", 0))
+                    bbox = fitz.Rect(image_info["bbox"])
+                    if xref <= 0 or bbox.width < 180 or bbox.height < 80:
+                        continue
                     if xref in seen_xrefs:
                         continue
                     seen_xrefs.add(xref)
@@ -566,9 +570,9 @@ class ManualSearchStore:
         candidates.sort(key=lambda item: item[0])
 
         hits: list[ManualHit] = []
-        seen: set[tuple[str, int, int]] = set()
+        seen: set[tuple[str, int]] = set()
         for score, item in candidates:
-            key = (str(item["manual_id"]), int(item["page"]), int(item.get("chunk", 0)))
+            key = (str(item["manual_id"]), int(item["page"]))
             if key in seen:
                 continue
             seen.add(key)

@@ -232,7 +232,7 @@ type ChatHistoryItem = {
 
 const HITS_PAGE_SIZE = 4;
 const SESSION_KEY = "ticket-ai-session";
-const CHAT_HISTORY_KEY_PREFIX = "ticket-ai-chat-history";
+const CHAT_HISTORY_KEY_PREFIX = "ticket-ai-chat-history-v2";
 
 function chatHistoryKey(userId: number) {
   return `${CHAT_HISTORY_KEY_PREFIX}-${userId}`;
@@ -1219,6 +1219,13 @@ function App() {
                     <h2>{answer.merged ? "Risposta unificata" : "Risposta dai ticket"}</h2>
                   </div>
                   <p className="answer-text">{answer.ticket_answer || answer.answer}</p>
+                  {answer.merged && (answer.manual_hits || []).length ? (
+                    <ManualEvidence
+                      hits={answer.manual_hits}
+                      session={session}
+                      onOpen={openProtectedFile}
+                    />
+                  ) : null}
                   <div className="model-line">
                     Modello: {answer.model} - Embedding: {answer.embedding_model}
                   </div>
@@ -1230,6 +1237,11 @@ function App() {
                       <h2>Risposta dai manuali</h2>
                     </div>
                     <p className="answer-text">{answer.manual_answer}</p>
+                    <ManualEvidence
+                      hits={answer.manual_hits || []}
+                      session={session}
+                      onOpen={openProtectedFile}
+                    />
                   </section>
                 ) : null}
               </div>
@@ -1289,43 +1301,6 @@ function App() {
                   ))}
                 </div>
               </section>
-              {(answer.manual_hits || []).length ? (
-                <section className="hits-panel manual-hits-panel elevated-panel">
-                  <div className="list-header">
-                    <div className="panel-title">
-                      <BookOpen size={19} />
-                      <div>
-                        <h2>Pagine dei manuali</h2>
-                        <p>{answer.manual_hits.length} riferimenti</p>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="manual-hit-grid">
-                    {answer.manual_hits.map((hit) => (
-                      <article className="manual-hit" key={`${hit.manual_id}-${hit.page}-${hit.rank}`}>
-                        {hit.page_image_url ? (
-                          <AuthenticatedImage
-                            path={hit.page_image_url}
-                            session={session}
-                            alt={`${hit.manual_title}, pagina ${hit.page}`}
-                          />
-                        ) : null}
-                        <div className="manual-hit-copy">
-                          <div className="hit-topline">
-                            <strong>{hit.manual_title}</strong>
-                            <span>pagina {hit.page}</span>
-                          </div>
-                          <p>{hit.excerpt}</p>
-                          <button className="secondary-button" type="button" onClick={() => openProtectedFile(hit.pdf_url)}>
-                            <FileText size={17} />
-                            Apri PDF
-                          </button>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </section>
-              ) : null}
             </div>
           ) : null}
         </section>
@@ -1957,7 +1932,67 @@ function App() {
   );
 }
 
-function AuthenticatedImage({ path, session, alt }: { path: string; session: Session; alt: string }) {
+function ManualEvidence({
+  hits,
+  session,
+  onOpen
+}: {
+  hits: ManualHit[];
+  session: Session;
+  onOpen: (path: string) => void;
+}) {
+  const images = hits
+    .flatMap((hit) => hit.image_urls.map((path) => ({ path, hit })))
+    .filter((item, index, items) => items.findIndex((other) => other.path === item.path) === index)
+    .slice(0, 6);
+
+  if (!hits.length) return null;
+  return (
+    <div className="manual-evidence">
+      {images.length ? (
+        <div className="manual-evidence-grid">
+          {images.map(({ path, hit }) => (
+            <figure key={path}>
+              <AuthenticatedImage
+                path={path}
+                session={session}
+                alt={`${hit.manual_title}, pagina ${hit.page}`}
+                className="manual-evidence-image"
+              />
+              <figcaption>
+                <span>{hit.manual_title} - pagina {hit.page}</span>
+                <button type="button" onClick={() => onOpen(hit.pdf_url)} aria-label={`Apri pagina ${hit.page}`}>
+                  <ExternalLink size={15} />
+                </button>
+              </figcaption>
+            </figure>
+          ))}
+        </div>
+      ) : (
+        <div className="manual-citation-links">
+          {hits.map((hit) => (
+            <button className="secondary-button" type="button" key={`${hit.manual_id}-${hit.page}`} onClick={() => onOpen(hit.pdf_url)}>
+              <FileText size={16} />
+              {hit.manual_title}, pagina {hit.page}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AuthenticatedImage({
+  path,
+  session,
+  alt,
+  className = "manual-page-preview"
+}: {
+  path: string;
+  session: Session;
+  alt: string;
+  className?: string;
+}) {
   const [source, setSource] = useState("");
 
   useEffect(() => {
@@ -1980,7 +2015,7 @@ function AuthenticatedImage({ path, session, alt }: { path: string; session: Ses
     };
   }, [path, session.token]);
 
-  return source ? <img className="manual-page-preview" src={source} alt={alt} loading="lazy" /> : <div className="image-placeholder" />;
+  return source ? <img className={className} src={source} alt={alt} loading="lazy" /> : <div className="image-placeholder" />;
 }
 
 function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {

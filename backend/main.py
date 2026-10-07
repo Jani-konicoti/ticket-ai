@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import re
 import shutil
 import threading
 import time
@@ -27,6 +28,7 @@ from .models import (
     JobResponse,
     LoginRequest,
     ManualDocument,
+    ManualHit,
     ManualPermissionsRequest,
     RecentProblemsResponse,
     RebuildRequest,
@@ -210,6 +212,26 @@ def _departments_for_user(user: CurrentUser, requested_department_id: int | None
             raise HTTPException(status_code=403, detail="Non sei autorizzato a consultare questo reparto.")
         return {requested_department_id}
     return allowed
+
+
+def _cited_manual_hits(answer: str, hits: list[ManualHit]) -> list[ManualHit]:
+    citations = re.findall(
+        r"\[Manuale:\s*(.*?)\s*(?:\||,)\s*pagina\s*(\d+)\]",
+        answer,
+        flags=re.IGNORECASE,
+    )
+    selected = []
+    if citations:
+        for hit in hits:
+            for title, page in citations:
+                normalized_title = " ".join(title.split()).casefold()
+                hit_title = " ".join(hit.manual_title.split()).casefold()
+                if hit.page == int(page) and (normalized_title in hit_title or hit_title in normalized_title):
+                    selected.append(hit)
+                    break
+    if not selected:
+        selected = hits[:3]
+    return [hit.model_copy(update={"rank": index}) for index, hit in enumerate(selected, start=1)]
 
 
 def _refresh_recent_problem_cache(periods: tuple[int, ...], job: JobState, source: str) -> None:
@@ -727,7 +749,7 @@ def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) 
             raw_hits = [hit for hit in raw_hits if hit["score"] >= payload.min_score]
         hits = [TicketHit(**hit) for hit in raw_hits]
         manual_hits = (
-            get_manual_search_store().search(embedding, payload.top_k, department_ids)
+            get_manual_search_store().search(embedding, min(payload.top_k, 6), department_ids)
             if payload.include_manuals
             else []
         )
@@ -760,6 +782,7 @@ def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) 
             answer = openai_service.answer_question(payload.question, hits)
             ticket_answer = answer
             manual_answer = None
+        response_manual_hits = _cited_manual_hits(answer if payload.merge_answers else manual_answer or "", manual_hits)
         return AskResponse(
             answer=answer,
             hits=hits,
@@ -767,7 +790,7 @@ def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) 
             embedding_model=embedding_model,
             ticket_answer=ticket_answer,
             manual_answer=manual_answer,
-            manual_hits=manual_hits,
+            manual_hits=response_manual_hits,
             merged=payload.include_manuals and payload.merge_answers,
         )
     except HTTPException:
