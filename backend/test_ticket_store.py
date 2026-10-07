@@ -104,6 +104,18 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertIn("non riuscita", restored["error"])  # type: ignore[index]
             self.assertEqual((manual_dir / "manual.faiss").read_bytes(), b"indice precedente")
 
+    def test_interrupted_initial_ingestion_is_not_treated_as_valid_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manual_dir = Path(temp_dir) / "manual"
+            partial_pages = manual_dir / "pages"
+            partial_pages.mkdir(parents=True)
+            (partial_pages / "page-0001.webp").write_bytes(b"partial")
+
+            backup = ManualIndexManager._backup_generated_files(manual_dir)
+
+            self.assertIsNone(backup)
+            self.assertFalse(partial_pages.exists())
+
     def test_search_merges_base_and_append_shards(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             faiss_dir = Path(temp_dir)

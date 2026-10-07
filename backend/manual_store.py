@@ -512,6 +512,10 @@ class ManualIndexManager:
         backup = manual_dir / ".reindex-backup"
         if backup.exists():
             cls._restore_generated_files(manual_dir, backup)
+        # Partial output from an interrupted first ingestion is not a usable rollback target.
+        if not (manual_dir / "manual.faiss").exists() or not (manual_dir / "metadata.json").exists():
+            cls._clear_generated_files(manual_dir)
+            return None
         names = ("pages", "images", "manual.faiss", "metadata.json")
         existing = [manual_dir / name for name in names if (manual_dir / name).exists()]
         if not existing:
