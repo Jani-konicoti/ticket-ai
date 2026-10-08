@@ -83,6 +83,17 @@ class AuthStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manual_view_sessions (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    manual_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
 
     def _seed_admin(self) -> None:
         with closing(self._connect()) as conn, conn:
@@ -273,6 +284,42 @@ class AuthStore:
                   AND users.active = 1
                 """,
                 (token, now),
+            ).fetchone()
+        if not row:
+            return None
+        return self._user_from_row(row)
+
+    def create_manual_view_session(self, user_id: int, manual_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        now = datetime.utcnow()
+        expires = now + timedelta(minutes=30)
+        with closing(self._connect()) as conn, conn:
+            conn.execute("DELETE FROM manual_view_sessions WHERE expires_at <= ?", (now.isoformat(),))
+            conn.execute(
+                """
+                INSERT INTO manual_view_sessions (token, user_id, manual_id, expires_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (token, user_id, manual_id, expires.isoformat()),
+            )
+        return token
+
+    def user_for_manual_view_session(self, token: str, manual_id: str) -> CurrentUser | None:
+        if not token:
+            return None
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT users.id, users.username, users.role, users.all_departments,
+                       users.auth_source, users.external_staff_id
+                FROM manual_view_sessions
+                JOIN users ON users.id = manual_view_sessions.user_id
+                WHERE manual_view_sessions.token = ?
+                  AND manual_view_sessions.manual_id = ?
+                  AND manual_view_sessions.expires_at > ?
+                  AND users.active = 1
+                """,
+                (token, manual_id, datetime.utcnow().isoformat()),
             ).fetchone()
         if not row:
             return None

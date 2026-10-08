@@ -372,6 +372,18 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertIsNotNone(authenticated)
             self.assertEqual(authenticated.department_ids, (3, 8))  # type: ignore[union-attr]
 
+    def test_manual_view_session_is_scoped_to_one_manual(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = AuthStore(Path(temp_dir) / "auth.sqlite")
+            user = store.create_user("operatore", "segreta", "user", False, [8])
+            token = store.create_manual_view_session(int(user["id"]), "manuale-a")
+
+            authorized = store.user_for_manual_view_session(token, "manuale-a")
+
+            self.assertIsNotNone(authorized)
+            self.assertEqual(authorized.username, "operatore")  # type: ignore[union-attr]
+            self.assertIsNone(store.user_for_manual_view_session(token, "manuale-b"))
+
     def test_osticket_user_is_created_and_departments_are_resynced(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = AuthStore(Path(temp_dir) / "auth.sqlite")

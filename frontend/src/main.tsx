@@ -971,15 +971,22 @@ function App() {
   async function openProtectedFile(path: string) {
     setManualsError("");
     try {
-      const response = await fetch(path, { headers: authHeaders(session) });
+      const requestedUrl = new URL(path, window.location.origin);
+      const match = requestedUrl.pathname.match(/^\/api\/manuals\/([^/]+)\/pdf$/);
+      if (!match) throw new Error("Riferimento al manuale non valido");
+      const manualId = decodeURIComponent(match[1]);
+      const response = await fetch(`/api/manuals/${encodeURIComponent(manualId)}/view-session`, {
+        method: "POST",
+        headers: authHeaders(session)
+      });
+      const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || "File non disponibile");
       }
-      const url = URL.createObjectURL(await response.blob());
-      const page = new URL(path, window.location.origin).searchParams.get("page");
-      window.open(`${url}${page ? `#page=${page}` : ""}`, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const target = new URL(payload.url, window.location.origin);
+      const page = requestedUrl.searchParams.get("page");
+      if (page) target.hash = `page=${page}`;
+      window.open(target.toString(), "_blank", "noopener,noreferrer");
     } catch (error) {
       setManualsError(error instanceof Error ? error.message : String(error));
     }

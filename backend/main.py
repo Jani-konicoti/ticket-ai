@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -520,8 +520,42 @@ def delete_manual(manual_id: str, _: CurrentUser = Depends(require_admin)) -> di
     return {"ok": True}
 
 
+def _manual_view_cookie_name(manual_id: str) -> str:
+    return f"manual_view_{manual_id.replace('-', '_')}"
+
+
+@app.post("/api/manuals/{manual_id}/view-session")
+def create_manual_view_session(
+    manual_id: str,
+    response: Response,
+    current_user: CurrentUser = Depends(require_user),
+) -> dict[str, str]:
+    _manual_for_user(manual_id, current_user)
+    token = get_auth_store().create_manual_view_session(current_user.id, manual_id)
+    response.set_cookie(
+        key=_manual_view_cookie_name(manual_id),
+        value=token,
+        max_age=30 * 60,
+        httponly=True,
+        samesite="strict",
+        path=f"/api/manuals/{manual_id}/pdf",
+    )
+    return {"url": f"/api/manuals/{manual_id}/pdf"}
+
+
 @app.get("/api/manuals/{manual_id}/pdf")
-def manual_pdf(manual_id: str, current_user: CurrentUser = Depends(require_user)) -> FileResponse:
+def manual_pdf(
+    manual_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> FileResponse:
+    auth_store = get_auth_store()
+    current_user = auth_store.user_for_token(_bearer_token(authorization))
+    if not current_user:
+        cookie = request.cookies.get(_manual_view_cookie_name(manual_id), "")
+        current_user = auth_store.user_for_manual_view_session(cookie, manual_id)
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Sessione non valida o scaduta.")
     manual = _manual_for_user(manual_id, current_user)
     path = get_settings().manuals_dir / manual_id / "original.pdf"
     if not path.exists():
