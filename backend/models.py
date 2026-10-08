@@ -9,6 +9,7 @@ class AskRequest(BaseModel):
     ticket_source: str | None = None
     include_manuals: bool = False
     merge_answers: bool = False
+    manuals_only: bool = False
 
 
 class TicketHit(BaseModel):
@@ -76,6 +77,7 @@ class AskResponse(BaseModel):
     manual_answer: str | None = None
     manual_hits: list[ManualHit] = Field(default_factory=list)
     merged: bool = False
+    manuals_only: bool = False
 
 
 class LoginRequest(BaseModel):

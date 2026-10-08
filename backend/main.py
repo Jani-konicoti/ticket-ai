@@ -12,6 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
+import faiss
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -94,10 +95,23 @@ def get_manual_index_manager() -> ManualIndexManager:
     if settings.openai_embedding_model.strip().lower() != "auto":
         embedding_model = settings.openai_embedding_model
     else:
-        try:
-            embedding_model = get_openai_service().resolve_embedding_model(get_store().stats.dimension)
-        except (FileNotFoundError, ValueError):
-            embedding_model = "text-embedding-3-large"
+        embedding_model = "text-embedding-3-large"
+        manual_dimension_found = False
+        for manual in get_manual_registry().list(None, include_unready=False):
+            index_path = settings.manuals_dir / str(manual["id"]) / "manual.faiss"
+            if not index_path.exists():
+                continue
+            try:
+                embedding_model = get_openai_service().resolve_embedding_model(faiss.read_index(str(index_path)).d)
+                manual_dimension_found = True
+                break
+            except (RuntimeError, ValueError):
+                logger.warning("Unable to read embedding dimension from manual %s", manual["id"])
+        if not manual_dimension_found:
+            try:
+                embedding_model = get_openai_service().resolve_embedding_model(get_store().stats.dimension)
+            except (FileNotFoundError, ValueError):
+                pass
     return ManualIndexManager(
         settings.manuals_dir,
         get_manual_registry(),
@@ -795,37 +809,63 @@ def get_analysis_job(job_id: str, _: CurrentUser = Depends(require_admin)) -> Jo
 @app.post("/api/ask", response_model=AskResponse)
 def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) -> AskResponse:
     try:
-        if job_manager.active():
+        if not payload.manuals_only and job_manager.active():
             raise HTTPException(status_code=503, detail="Indice FAISS in aggiornamento. Riprova al termine del job.")
-        store = get_store()
         openai_service = get_openai_service()
-        embedding_model = openai_service.resolve_embedding_model(store.stats.dimension)
-        embedding = openai_service.embed(payload.question, embedding_model)
         department_ids = _departments_for_user(current_user, payload.department_id)
-        raw_hits = store.search(
-            embedding,
-            top_k=payload.top_k,
-            department_ids=department_ids,
-            ticket_source=payload.ticket_source,
-        )
-        if payload.min_score is not None:
-            raw_hits = [hit for hit in raw_hits if hit["score"] >= payload.min_score]
-        hits = [TicketHit(**hit) for hit in raw_hits]
+        manuals_enabled = payload.include_manuals or payload.manuals_only
+        if payload.manuals_only:
+            if not get_manual_registry().list(department_ids, include_unready=False):
+                configured_model = get_settings().openai_embedding_model.strip()
+                embedding_model = configured_model if configured_model.lower() != "auto" else "text-embedding-3-large"
+                empty_answer = "Non ci sono manuali indicizzati disponibili per i reparti selezionati."
+                return AskResponse(
+                    answer=empty_answer,
+                    hits=[],
+                    model=openai_service.chat_model,
+                    embedding_model=embedding_model,
+                    manual_answer=empty_answer,
+                    manuals_only=True,
+                )
+            embedding_model = get_manual_index_manager().embedding_model
+            hits: list[TicketHit] = []
+        else:
+            store = get_store()
+            embedding_model = openai_service.resolve_embedding_model(store.stats.dimension)
+        embedding = openai_service.embed(payload.question, embedding_model)
+        if not payload.manuals_only:
+            raw_hits = store.search(
+                embedding,
+                top_k=payload.top_k,
+                department_ids=department_ids,
+                ticket_source=payload.ticket_source,
+            )
+            if payload.min_score is not None:
+                raw_hits = [hit for hit in raw_hits if hit["score"] >= payload.min_score]
+            hits = [TicketHit(**hit) for hit in raw_hits]
         manual_hits = (
             get_manual_search_store().search(embedding, min(payload.top_k, 6), department_ids)
-            if payload.include_manuals
+            if manuals_enabled
             else []
         )
         if not hits and not manual_hits:
+            empty_answer = "Non ho trovato informazioni abbastanza simili nelle fonti disponibili."
             return AskResponse(
-                answer="Non ho trovato informazioni abbastanza simili nelle fonti disponibili.",
+                answer=empty_answer,
                 hits=[],
                 model=openai_service.chat_model,
                 embedding_model=embedding_model,
+                ticket_answer=None if payload.manuals_only else empty_answer,
+                manual_answer=empty_answer if payload.manuals_only else None,
                 manual_hits=[],
-                merged=payload.merge_answers,
+                merged=payload.merge_answers and not payload.manuals_only,
+                manuals_only=payload.manuals_only,
             )
-        if payload.include_manuals and payload.merge_answers:
+        if payload.manuals_only:
+            manual_answer = openai_service.answer_from_manuals(payload.question, manual_hits)
+            answer = manual_answer
+            ticket_answer = None
+        elif payload.include_manuals and payload.merge_answers:
             answer = openai_service.answer_combined(payload.question, hits, manual_hits)
             ticket_answer = None
             manual_answer = None
@@ -854,7 +894,8 @@ def ask(payload: AskRequest, current_user: CurrentUser = Depends(require_user)) 
             ticket_answer=ticket_answer,
             manual_answer=manual_answer,
             manual_hits=response_manual_hits,
-            merged=payload.include_manuals and payload.merge_answers,
+            merged=payload.include_manuals and payload.merge_answers and not payload.manuals_only,
+            manuals_only=payload.manuals_only,
         )
     except HTTPException:
         raise

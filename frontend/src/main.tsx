@@ -82,6 +82,7 @@ type AskResponse = {
   manual_answer?: string | null;
   manual_hits: ManualHit[];
   merged: boolean;
+  manuals_only?: boolean;
 };
 
 type ManualHit = {
@@ -247,6 +248,7 @@ type ChatHistoryItem = {
   ticket_source: string;
   include_manuals?: boolean;
   merge_answers?: boolean;
+  manuals_only?: boolean;
   response: AskResponse;
 };
 
@@ -391,6 +393,7 @@ function App() {
   const [chatSource, setChatSource] = useState("");
   const [includeManuals, setIncludeManuals] = useState(false);
   const [mergeAnswers, setMergeAnswers] = useState(false);
+  const [manualsOnly, setManualsOnly] = useState(false);
   const [askLoading, setAskLoading] = useState(false);
   const [askError, setAskError] = useState("");
   const [askCacheHit, setAskCacheHit] = useState(false);
@@ -598,7 +601,8 @@ function App() {
         (item.department_id ?? null) === chatDepartmentId &&
         (item.ticket_source || "") === chatSource &&
         Boolean(item.include_manuals) === includeManuals &&
-        Boolean(item.merge_answers) === (includeManuals && mergeAnswers)
+        Boolean(item.merge_answers) === (includeManuals && mergeAnswers && !manualsOnly) &&
+        Boolean(item.manuals_only) === manualsOnly
     );
     if (cached) {
       setAskCacheHit(true);
@@ -621,8 +625,9 @@ function App() {
           top_k: topK,
           department_id: chatDepartmentId,
           ticket_source: chatSource || null,
-          include_manuals: includeManuals,
-          merge_answers: includeManuals && mergeAnswers
+          include_manuals: includeManuals || manualsOnly,
+          merge_answers: includeManuals && mergeAnswers && !manualsOnly,
+          manuals_only: manualsOnly
         })
       });
       const payload = await response.json();
@@ -636,8 +641,9 @@ function App() {
           top_k: topK,
           department_id: chatDepartmentId,
           ticket_source: chatSource,
-          include_manuals: includeManuals,
-          merge_answers: includeManuals && mergeAnswers,
+          include_manuals: includeManuals || manualsOnly,
+          merge_answers: includeManuals && mergeAnswers && !manualsOnly,
+          manuals_only: manualsOnly,
           response: payload
         },
         ...chatHistory.filter((item) => item.question.trim().toLowerCase() !== normalizedQuestion.toLowerCase()).slice(0, 24)
@@ -1191,8 +1197,9 @@ function App() {
     setTopK(item.top_k);
     setChatDepartmentId(item.department_id ?? null);
     setChatSource(item.ticket_source || "");
-    setIncludeManuals(Boolean(item.include_manuals));
+    setIncludeManuals(Boolean(item.include_manuals) || Boolean(item.manuals_only));
     setMergeAnswers(Boolean(item.merge_answers));
+    setManualsOnly(Boolean(item.manuals_only));
     setAnswer(item.response);
     setAskCacheHit(true);
     setHitPage(1);
@@ -1283,7 +1290,7 @@ function App() {
                 <h2>Descrivi il problema</h2>
                 <p>Scrivi come lo racconterebbe un cliente o un operatore.</p>
               </div>
-              <span className="soft-chip">{topK} ticket</span>
+              <span className="soft-chip">{topK} {manualsOnly ? "riferimenti" : "ticket"}</span>
             </div>
             <textarea
               id="question"
@@ -1305,7 +1312,11 @@ function App() {
               <label className="select-control">
                 <Filter size={18} />
                 <span>Fonte</span>
-                <select value={chatSource} onChange={(event) => setChatSource(event.target.value)}>
+                <select
+                  value={chatSource}
+                  disabled={manualsOnly}
+                  onChange={(event) => setChatSource(event.target.value)}
+                >
                   <option value="">Tutte</option>
                   {filterOptions.sources.map((source) => <option key={source} value={source}>{source}</option>)}
                 </select>
@@ -1316,16 +1327,37 @@ function App() {
                   checked={includeManuals}
                   onChange={(event) => {
                     setIncludeManuals(event.target.checked);
-                    if (!event.target.checked) setMergeAnswers(false);
+                    if (!event.target.checked) {
+                      setMergeAnswers(false);
+                      setManualsOnly(false);
+                    }
                   }}
                 />
                 <span>Anche dai manuali</span>
               </label>
               {includeManuals ? (
-                <label className="checkbox-option source-toggle">
-                  <input type="checkbox" checked={mergeAnswers} onChange={(event) => setMergeAnswers(event.target.checked)} />
-                  <span>Unisci risposte</span>
-                </label>
+                <>
+                  <label className="checkbox-option source-toggle">
+                    <input
+                      type="checkbox"
+                      checked={manualsOnly}
+                      onChange={(event) => {
+                        setManualsOnly(event.target.checked);
+                        if (event.target.checked) {
+                          setMergeAnswers(false);
+                          setChatSource("");
+                        }
+                      }}
+                    />
+                    <span>Solo manuali</span>
+                  </label>
+                  {!manualsOnly ? (
+                    <label className="checkbox-option source-toggle">
+                      <input type="checkbox" checked={mergeAnswers} onChange={(event) => setMergeAnswers(event.target.checked)} />
+                      <span>Unisci risposte</span>
+                    </label>
+                  ) : null}
+                </>
               ) : null}
             </div>
             <div className="controls-row">
@@ -1335,7 +1367,7 @@ function App() {
               </label>
               <button className="primary-button" type="submit" disabled={askLoading || !question.trim()}>
                 {askLoading ? <Loader2 className="spin" size={18} /> : <Search size={18} />}
-                Cerca casi simili
+                {manualsOnly ? "Cerca nei manuali" : "Cerca casi simili"}
               </button>
             </div>
             <div className="examples">
@@ -1348,7 +1380,9 @@ function App() {
           </form>
 
           {askError ? <ErrorBlock message={askError} /> : null}
-          {askLoading ? <LoadingPanel label="Sto cercando ticket simili e preparando la risposta..." /> : null}
+          {askLoading ? (
+            <LoadingPanel label={manualsOnly ? "Sto cercando nei manuali..." : "Sto cercando ticket simili e preparando la risposta..."} />
+          ) : null}
           {askCacheHit ? <div className="success-block">Risposta caricata dalla cronologia locale.</div> : null}
 
           {chatHistory.length ? (
@@ -1379,23 +1413,25 @@ function App() {
           {answer ? (
             <div className="search-results">
               <div className="answer-stack">
-                <section className="answer-panel elevated-panel">
-                  <div className="panel-title">
-                    <MessageSquareText size={19} />
-                    <h2>{answer.merged ? "Risposta unificata" : "Risposta dai ticket"}</h2>
-                  </div>
-                  <AnswerMarkdown text={answer.ticket_answer || answer.answer} />
-                  {answer.merged && (answer.manual_hits || []).length ? (
-                    <ManualEvidence
-                      hits={answer.manual_hits}
-                      session={session}
-                      onOpen={openManualReference}
-                    />
-                  ) : null}
-                  <div className="model-line">
-                    Modello: {answer.model} - Embedding: {answer.embedding_model}
-                  </div>
-                </section>
+                {!answer.manuals_only ? (
+                  <section className="answer-panel elevated-panel">
+                    <div className="panel-title">
+                      <MessageSquareText size={19} />
+                      <h2>{answer.merged ? "Risposta unificata" : "Risposta dai ticket"}</h2>
+                    </div>
+                    <AnswerMarkdown text={answer.ticket_answer || answer.answer} />
+                    {answer.merged && (answer.manual_hits || []).length ? (
+                      <ManualEvidence
+                        hits={answer.manual_hits}
+                        session={session}
+                        onOpen={openManualReference}
+                      />
+                    ) : null}
+                    <div className="model-line">
+                      Modello: {answer.model} - Embedding: {answer.embedding_model}
+                    </div>
+                  </section>
+                ) : null}
                 {!answer.merged && answer.manual_answer ? (
                   <section className="answer-panel manual-answer-panel elevated-panel">
                     <div className="panel-title">
@@ -1408,11 +1444,17 @@ function App() {
                       session={session}
                       onOpen={openManualReference}
                     />
+                    {answer.manuals_only ? (
+                      <div className="model-line">
+                        Modello: {answer.model} - Embedding: {answer.embedding_model}
+                      </div>
+                    ) : null}
                   </section>
                 ) : null}
               </div>
 
-              <section className="hits-panel elevated-panel">
+              {!answer.manuals_only ? (
+                <section className="hits-panel elevated-panel">
                 <div className="list-header">
                   <div className="panel-title">
                     <Ticket size={19} />
@@ -1466,7 +1508,8 @@ function App() {
                     </article>
                   ))}
                 </div>
-              </section>
+                </section>
+              ) : null}
             </div>
           ) : null}
         </section>
