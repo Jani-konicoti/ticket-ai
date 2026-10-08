@@ -33,9 +33,10 @@ from .models import DatabaseConfig
 truststore.inject_into_ssl()
 
 EMBEDDING_MODEL = "text-embedding-3-large"
-MAX_EMBED_TOKENS = 7200
+MAX_EMBED_TOKENS = 6000
 MAX_EMBED_BATCH_TOKENS = 80000
 CHUNK_TOKEN_OVERLAP = 160
+MAX_HEADER_TITLE_TOKENS = 320
 MAX_INDEX_SHARD_VECTORS = 20_000
 CSV_COLUMNS = [
     "id",
@@ -760,7 +761,11 @@ class VectorIndexBuilder:
                 job.skipped += len(entries)
                 return
 
-            chunks = self._conversation_chunks(entries)
+            chunks = [
+                safe_chunk
+                for chunk in self._conversation_chunks(entries)
+                for safe_chunk in self._split_for_embedding(chunk)
+            ]
             if not chunks:
                 job.skipped += len(entries)
                 return
@@ -882,10 +887,13 @@ class VectorIndexBuilder:
             return []
 
         ticket_number = entries[0].get("ticket_number") or entries[0].get("ticket_id")
-        header = f"Ticket #{ticket_number}\nTitolo ticket: {title}\nThread: {entries[0]['thread_id']}\n"
         encoding = cls._encoding()
+        title_tokens = encoding.encode(title)
+        if len(title_tokens) > MAX_HEADER_TITLE_TOKENS:
+            title = f"{encoding.decode(title_tokens[:MAX_HEADER_TITLE_TOKENS]).rstrip()}..."
+        header = f"Ticket #{ticket_number}\nTitolo ticket: {title}\nThread: {entries[0]['thread_id']}\n"
         header_tokens = encoding.encode(header)
-        available = max(500, MAX_EMBED_TOKENS - len(header_tokens) - 10)
+        available = max(1, MAX_EMBED_TOKENS - len(header_tokens) - 64)
         body_tokens = encoding.encode("\n\n".join(blocks))
         chunks: list[str] = []
         start = 0

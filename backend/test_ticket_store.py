@@ -20,6 +20,7 @@ from backend.index_builder import (
     CONVERSATION_DEFAULT_QUERY_V1,
     CONVERSATION_DEFAULT_QUERY_V2,
     LEGACY_DEFAULT_QUERY,
+    MAX_EMBED_TOKENS,
     ConfigStore,
     JobState,
     VectorIndexBuilder,
@@ -229,6 +230,28 @@ class TicketStoreShardTests(unittest.TestCase):
         self.assertNotIn("Firma molto lunga", chunks[0])
         self.assertNotIn("testo precedente", chunks[0])
         self.assertNotIn("Ticket trasferito", chunks[0])
+
+    def test_conversation_chunks_never_exceed_embedding_limit(self) -> None:
+        entries = [
+            {
+                "id": 10,
+                "thread_id": 7,
+                "ticket_id": 100,
+                "ticket_number": 99,
+                "staff_id": 0,
+                "user_id": 3,
+                "poster": "Anna",
+                "created": "2026-10-06 11:00:00",
+                "title": "Titolo molto lungo " * 2_000,
+                "body": "Dettaglio tecnico utile per la risoluzione. " * 5_000,
+                "entry_type": "M",
+            }
+        ]
+
+        chunks = VectorIndexBuilder._conversation_chunks(entries)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(VectorIndexBuilder._count_tokens(chunk) <= MAX_EMBED_TOKENS for chunk in chunks))
 
     def test_clean_body_stops_before_privacy_disclaimer(self) -> None:
         cleaned = clean_body("<p>Soluzione utile.</p><p>Ai sensi degli artt. 13 e 14 del GDPR...</p><p>Rumore</p>")
