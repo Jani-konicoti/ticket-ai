@@ -78,6 +78,7 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertEqual(len(hits), 1)
             self.assertEqual(hits[0].manual_title, "Manuale paghe")
             self.assertEqual(hits[0].page, 1)
+            self.assertEqual(hits[0].page_count, 1)
             self.assertTrue(hits[0].image_urls)
 
     def test_failed_manual_reindex_restores_previous_files(self) -> None:

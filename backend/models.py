@@ -35,6 +35,7 @@ class ManualHit(BaseModel):
     manual_id: str
     manual_title: str
     page: int
+    page_count: int
     excerpt: str
     body: str
     image_urls: list[str] = Field(default_factory=list)

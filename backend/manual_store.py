@@ -555,7 +555,9 @@ class ManualSearchStore:
     ) -> list[ManualHit]:
         vector = np.asarray([query_embedding], dtype="float32")
         candidates: list[tuple[float, dict[str, Any]]] = []
-        for manual in self.registry.list(allowed_department_ids, include_unready=False):
+        manuals = self.registry.list(allowed_department_ids, include_unready=False)
+        page_counts = {str(manual["id"]): int(manual["page_count"]) for manual in manuals}
+        for manual in manuals:
             index, metadata = self._load(manual["id"])
             if vector.shape[1] != index.d:
                 logger.warning("Skipping manual %s: embedding dimension mismatch", manual["id"])
@@ -586,6 +588,7 @@ class ManualSearchStore:
                     manual_id=manual_id,
                     manual_title=str(item["manual_title"]),
                     page=page,
+                    page_count=page_counts.get(manual_id, page),
                     excerpt=body[:700].rstrip() + ("..." if len(body) > 700 else ""),
                     body=body,
                     image_urls=[f"/api/manuals/{manual_id}/assets/{path}" for path in item.get("images", [])],

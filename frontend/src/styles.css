@@ -1724,6 +1724,99 @@ select {
   border-top: 1px solid #dfe7ef;
 }
 
+.manual-viewer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgb(15 23 42 / 72%);
+}
+
+.manual-viewer {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: min(1180px, 100%);
+  height: min(94vh, 1080px);
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 32%);
+}
+
+.manual-viewer-header,
+.manual-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #dce4ee;
+}
+
+.manual-viewer-header {
+  justify-content: space-between;
+}
+
+.manual-viewer-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.manual-viewer-header strong {
+  overflow: hidden;
+  color: #172033;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-viewer-header span,
+.manual-page-control span {
+  color: #66758a;
+  font-size: 0.84rem;
+}
+
+.manual-viewer-toolbar {
+  justify-content: center;
+  background: #f8fafc;
+}
+
+.manual-page-control {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.manual-page-control input {
+  width: 72px;
+  min-height: 36px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+.manual-pdf-button {
+  margin-left: auto;
+}
+
+.manual-viewer-canvas {
+  min-height: 0;
+  padding: 20px;
+  overflow: auto;
+  background: #dfe5eb;
+}
+
+.manual-viewer-page {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  background: #fff;
+  box-shadow: 0 4px 18px rgb(15 23 42 / 18%);
+}
+
 .manual-evidence-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2031,6 +2124,30 @@ select {
 }
 
 @media (max-width: 560px) {
+  .manual-viewer-overlay {
+    padding: 0;
+  }
+
+  .manual-viewer {
+    width: 100%;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+
+  .manual-viewer-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .manual-pdf-button {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .manual-viewer-canvas {
+    padding: 10px;
+  }
+
   .manual-evidence-grid {
     grid-template-columns: 1fr;
   }

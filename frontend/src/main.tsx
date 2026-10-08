@@ -37,7 +37,8 @@ import {
   Ticket,
   Trash2,
   UserPlus,
-  Users
+  Users,
+  X
 } from "lucide-react";
 import "./styles.css";
 
@@ -89,6 +90,7 @@ type ManualHit = {
   manual_id: string;
   manual_title: string;
   page: number;
+  page_count?: number;
   excerpt: string;
   body: string;
   image_urls: string[];
@@ -113,6 +115,13 @@ type ManualDocument = {
   created_by: string;
   created_at: string;
   updated_at: string;
+};
+
+type ManualViewerState = {
+  manualId: string;
+  title: string;
+  page: number;
+  pageCount: number;
 };
 
 type ProblemGroup = {
@@ -415,6 +424,7 @@ function App() {
   const [manualTitle, setManualTitle] = useState("");
   const [manualAllDepartments, setManualAllDepartments] = useState(true);
   const [manualDepartmentIds, setManualDepartmentIds] = useState<number[]>([]);
+  const [manualViewer, setManualViewer] = useState<ManualViewerState | null>(null);
 
   useEffect(() => {
     if (!session) {
@@ -992,6 +1002,24 @@ function App() {
     }
   }
 
+  function openManualReference(hit: ManualHit) {
+    setManualViewer({
+      manualId: hit.manual_id,
+      title: hit.manual_title,
+      page: hit.page,
+      pageCount: Math.max(hit.page, Number(hit.page_count) || hit.page)
+    });
+  }
+
+  function openManualDocument(manual: ManualDocument) {
+    setManualViewer({
+      manualId: manual.id,
+      title: manual.title,
+      page: 1,
+      pageCount: Math.max(1, manual.page_count)
+    });
+  }
+
   async function loadUsers() {
     setUsersLoading(true);
     setUsersError("");
@@ -1254,7 +1282,7 @@ function App() {
                     <ManualEvidence
                       hits={answer.manual_hits}
                       session={session}
-                      onOpen={openProtectedFile}
+                      onOpen={openManualReference}
                     />
                   ) : null}
                   <div className="model-line">
@@ -1271,7 +1299,7 @@ function App() {
                     <ManualEvidence
                       hits={answer.manual_hits || []}
                       session={session}
-                      onOpen={openProtectedFile}
+                      onOpen={openManualReference}
                     />
                   </section>
                 ) : null}
@@ -1696,9 +1724,9 @@ function App() {
                         className="icon-button"
                         type="button"
                         disabled={manual.status !== "ready"}
-                        onClick={() => openProtectedFile(`/api/manuals/${manual.id}/pdf`)}
+                        onClick={() => openManualDocument(manual)}
                         aria-label={`Apri ${manual.title}`}
-                        title="Apri PDF"
+                        title="Apri manuale"
                       >
                         <ExternalLink size={18} />
                       </button>
@@ -1959,7 +1987,112 @@ function App() {
       ) : (
         <div className="empty-state">Sezione non disponibile per il tuo ruolo.</div>
       )}
+      {manualViewer ? (
+        <ManualPageViewer
+          viewer={manualViewer}
+          session={session}
+          onClose={() => setManualViewer(null)}
+          onPageChange={(page) =>
+            setManualViewer((current) =>
+              current ? { ...current, page: Math.max(1, Math.min(page, current.pageCount)) } : current
+            )
+          }
+          onOpenPdf={() => openProtectedFile(`/api/manuals/${manualViewer.manualId}/pdf`)}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function ManualPageViewer({
+  viewer,
+  session,
+  onClose,
+  onPageChange,
+  onOpenPdf
+}: {
+  viewer: ManualViewerState;
+  session: Session;
+  onClose: () => void;
+  onPageChange: (page: number) => void;
+  onOpenPdf: () => void;
+}) {
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft") onPageChange(viewer.page - 1);
+      if (event.key === "ArrowRight") onPageChange(viewer.page + 1);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [viewer.page, onClose, onPageChange]);
+
+  const pagePath = `/api/manuals/${viewer.manualId}/assets/pages/page-${String(viewer.page).padStart(4, "0")}.webp`;
+  return (
+    <div className="manual-viewer-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="manual-viewer" role="dialog" aria-modal="true" aria-label={`${viewer.title}, pagina ${viewer.page}`}>
+        <header className="manual-viewer-header">
+          <div>
+            <strong>{viewer.title}</strong>
+            <span>Pagina {viewer.page} di {viewer.pageCount}</span>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Chiudi manuale" title="Chiudi">
+            <X size={19} />
+          </button>
+        </header>
+        <div className="manual-viewer-toolbar">
+          <button
+            className="icon-button"
+            type="button"
+            disabled={viewer.page <= 1}
+            onClick={() => onPageChange(viewer.page - 1)}
+            aria-label="Pagina precedente"
+            title="Pagina precedente"
+          >
+            <ChevronLeft size={20} />
+          </button>
+          <label className="manual-page-control">
+            <span>Pagina</span>
+            <input
+              type="number"
+              min={1}
+              max={viewer.pageCount}
+              value={viewer.page}
+              onChange={(event) => onPageChange(Number(event.target.value) || 1)}
+            />
+            <span>di {viewer.pageCount}</span>
+          </label>
+          <button
+            className="icon-button"
+            type="button"
+            disabled={viewer.page >= viewer.pageCount}
+            onClick={() => onPageChange(viewer.page + 1)}
+            aria-label="Pagina successiva"
+            title="Pagina successiva"
+          >
+            <ChevronRight size={20} />
+          </button>
+          <button className="secondary-button manual-pdf-button" type="button" onClick={onOpenPdf}>
+            <ExternalLink size={17} />
+            PDF completo
+          </button>
+        </div>
+        <div className="manual-viewer-canvas">
+          <AuthenticatedImage
+            key={pagePath}
+            path={pagePath}
+            session={session}
+            alt={`${viewer.title}, pagina ${viewer.page}`}
+            className="manual-viewer-page"
+          />
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1970,7 +2103,7 @@ function ManualEvidence({
 }: {
   hits: ManualHit[];
   session: Session;
-  onOpen: (path: string) => void;
+  onOpen: (hit: ManualHit) => void;
 }) {
   const images = hits
     .flatMap((hit) => hit.image_urls.map((path) => ({ path, hit })))
@@ -1992,7 +2125,7 @@ function ManualEvidence({
               />
               <figcaption>
                 <span>{hit.manual_title} - pagina {hit.page}</span>
-                <button type="button" onClick={() => onOpen(hit.pdf_url)} aria-label={`Apri pagina ${hit.page}`}>
+                <button type="button" onClick={() => onOpen(hit)} aria-label={`Apri pagina ${hit.page}`}>
                   <ExternalLink size={15} />
                 </button>
               </figcaption>
@@ -2002,7 +2135,7 @@ function ManualEvidence({
       ) : (
         <div className="manual-citation-links">
           {hits.map((hit) => (
-            <button className="secondary-button" type="button" key={`${hit.manual_id}-${hit.page}`} onClick={() => onOpen(hit.pdf_url)}>
+            <button className="secondary-button" type="button" key={`${hit.manual_id}-${hit.page}`} onClick={() => onOpen(hit)}>
               <FileText size={16} />
               {hit.manual_title}, pagina {hit.page}
             </button>
