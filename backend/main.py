@@ -431,6 +431,7 @@ async def upload_manual(
     title: str = Form(default=""),
     all_departments: bool = Form(default=True),
     department_ids: str = Form(default="[]"),
+    replace_manual_id: str = Form(default=""),
     current_user: CurrentUser = Depends(require_admin),
 ) -> ManualDocument:
     filename = Path(file.filename or "manuale.pdf").name
@@ -446,28 +447,56 @@ async def upload_manual(
     manual_title = title.strip() or Path(filename).stem
     if len(manual_title) > 180:
         raise HTTPException(status_code=400, detail="Il titolo non puo' superare 180 caratteri.")
-    manual = get_manual_registry().create(
+    registry = get_manual_registry()
+    existing = registry.find_by_filename(filename)
+    replacing = existing is not None
+    if existing and replace_manual_id != str(existing["id"]):
+        raise HTTPException(
+            status_code=409,
+            detail=f'Il manuale "{existing["title"]}" usa gia\' il file {filename}. Conferma la sostituzione.',
+        )
+    if replace_manual_id and (not existing or replace_manual_id != str(existing["id"])):
+        raise HTTPException(status_code=409, detail="Il manuale da sostituire non corrisponde piu' al file selezionato.")
+    if existing and existing["status"] in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="Il manuale con lo stesso nome e' gia' in elaborazione.")
+
+    manual = existing or registry.create(
         manual_title, filename, current_user.username, all_departments, parsed_departments
     )
     manual_dir = get_settings().manuals_dir / manual["id"]
-    manual_dir.mkdir(parents=True, exist_ok=False)
+    manual_dir.mkdir(parents=True, exist_ok=replacing)
     pdf_path = manual_dir / "original.pdf"
+    upload_path = manual_dir / "original.pdf.upload"
+    previous_pdf = manual_dir / "original.pdf.previous"
     size = 0
     limit = get_settings().manual_max_upload_mb * 1024 * 1024
     try:
-        with pdf_path.open("wb") as output:
+        upload_path.unlink(missing_ok=True)
+        with upload_path.open("wb") as output:
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > limit:
                     raise ValueError(f"Il PDF supera il limite di {get_settings().manual_max_upload_mb} MB.")
                 output.write(chunk)
-        with pdf_path.open("rb") as uploaded:
+        with upload_path.open("rb") as uploaded:
             if uploaded.read(5) != b"%PDF-":
                 raise ValueError("Il file caricato non e' un PDF valido.")
+        if replacing:
+            if not pdf_path.exists():
+                raise FileNotFoundError("PDF originale da sostituire non trovato.")
+            previous_pdf.unlink(missing_ok=True)
+            pdf_path.replace(previous_pdf)
+        upload_path.replace(pdf_path)
         get_manual_index_manager().start(str(manual["id"]))
     except Exception as exc:
-        shutil.rmtree(manual_dir, ignore_errors=True)
-        get_manual_registry().delete(str(manual["id"]))
+        upload_path.unlink(missing_ok=True)
+        if replacing:
+            if previous_pdf.exists():
+                pdf_path.unlink(missing_ok=True)
+                previous_pdf.replace(pdf_path)
+        else:
+            shutil.rmtree(manual_dir, ignore_errors=True)
+            registry.delete(str(manual["id"]))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         await file.close()

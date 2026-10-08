@@ -40,6 +40,7 @@ class TicketStoreShardTests(unittest.TestCase):
             root = Path(temp_dir)
             registry = ManualRegistry(root / "app.sqlite")
             manual = registry.create("Manuale paghe", "paghe.pdf", "admin", False, [10])
+            self.assertEqual(registry.find_by_filename("PAGHE.PDF")["id"], manual["id"])  # type: ignore[index]
             manual_dir = root / "manuals" / manual["id"]
             manual_dir.mkdir(parents=True)
 
@@ -106,6 +107,53 @@ class TicketStoreShardTests(unittest.TestCase):
             self.assertEqual(restored["chunk_count"], 9)  # type: ignore[index]
             self.assertIn("non riuscita", restored["error"])  # type: ignore[index]
             self.assertEqual((manual_dir / "manual.faiss").read_bytes(), b"indice precedente")
+
+    def test_failed_manual_replacement_restores_previous_pdf(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ManualRegistry(root / "app.sqlite")
+            manual = registry.create("Manuale", "manuale.pdf", "admin", True, [])
+            manual_dir = root / "manuals" / manual["id"]
+            manual_dir.mkdir(parents=True)
+            (manual_dir / "original.pdf").write_bytes(b"%PDF-new")
+            (manual_dir / "original.pdf.previous").write_bytes(b"%PDF-old")
+            (manual_dir / "manual.faiss").write_bytes(b"indice precedente")
+            (manual_dir / "metadata.json").write_text("[]", encoding="utf-8")
+            registry.update_status(str(manual["id"]), "ready", page_count=2, chunk_count=3, image_count=1)
+
+            manager = ManualIndexManager(root / "manuals", registry, object(), "model")  # type: ignore[arg-type]
+            with (
+                patch.object(manager, "_build", side_effect=RuntimeError("servizio non disponibile")),
+                patch("backend.manual_store.logger.exception"),
+            ):
+                manager._run(str(manual["id"]))
+
+            self.assertEqual((manual_dir / "original.pdf").read_bytes(), b"%PDF-old")
+            self.assertFalse((manual_dir / "original.pdf.previous").exists())
+            self.assertEqual((manual_dir / "manual.faiss").read_bytes(), b"indice precedente")
+
+    def test_interrupted_manual_replacement_is_recovered_on_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ManualRegistry(root / "app.sqlite")
+            manual = registry.create("Manuale", "manuale.pdf", "admin", True, [])
+            manual_dir = root / "manuals" / manual["id"]
+            backup_dir = manual_dir / ".reindex-backup"
+            backup_dir.mkdir(parents=True)
+            (manual_dir / "original.pdf").write_bytes(b"%PDF-new-partial")
+            (manual_dir / "original.pdf.previous").write_bytes(b"%PDF-old")
+            (manual_dir / "manual.faiss").write_bytes(b"indice parziale")
+            (backup_dir / "manual.faiss").write_bytes(b"indice precedente")
+            (backup_dir / "metadata.json").write_text("[]", encoding="utf-8")
+            registry.update_status(str(manual["id"]), "processing", page_count=4, chunk_count=8, image_count=2)
+
+            ManualIndexManager(root / "manuals", registry, object(), "model")  # type: ignore[arg-type]
+
+            recovered = registry.get(str(manual["id"]))
+            self.assertEqual((manual_dir / "original.pdf").read_bytes(), b"%PDF-old")
+            self.assertEqual((manual_dir / "manual.faiss").read_bytes(), b"indice precedente")
+            self.assertEqual(recovered["status"], "ready")  # type: ignore[index]
+            self.assertFalse(backup_dir.exists())
 
     def test_interrupted_initial_ingestion_is_not_treated_as_valid_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

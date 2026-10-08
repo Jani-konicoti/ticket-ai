@@ -126,6 +126,14 @@ class ManualRegistry:
             ).fetchall()
         return self._serialize(row, department_rows)
 
+    def find_by_filename(self, filename: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT id FROM manuals WHERE filename = ? COLLATE NOCASE ORDER BY created_at DESC LIMIT 1",
+                (filename,),
+            ).fetchone()
+        return self.get(str(row["id"])) if row else None
+
     def list(self, allowed_department_ids: set[int] | None, include_unready: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM manuals"
         params: tuple[object, ...] = ()
@@ -228,7 +236,29 @@ class ManualIndexManager:
         self._lock = threading.Lock()
         self._active: set[str] = set()
         self._queue: queue.Queue[str] = queue.Queue()
+        self._recover_interrupted_replacements()
         threading.Thread(target=self._worker_loop, daemon=True).start()
+
+    def _recover_interrupted_replacements(self) -> None:
+        for previous_pdf in self.root.glob("*/original.pdf.previous"):
+            manual_dir = previous_pdf.parent
+            manual_id = manual_dir.name
+            original_pdf = manual_dir / "original.pdf"
+            original_pdf.unlink(missing_ok=True)
+            previous_pdf.replace(original_pdf)
+            backup = manual_dir / ".reindex-backup"
+            if backup.exists():
+                self._restore_generated_files(manual_dir, backup)
+            manual = self.registry.get(manual_id)
+            if manual and (manual_dir / "manual.faiss").exists() and (manual_dir / "metadata.json").exists():
+                self.registry.update_status(
+                    manual_id,
+                    "ready",
+                    error="Sostituzione interrotta dal riavvio: PDF e indice precedenti ripristinati.",
+                    progress_step="Indice precedente ripristinato",
+                    progress_current=manual["page_count"],
+                    progress_total=manual["page_count"],
+                )
 
     def start(self, manual_id: str) -> None:
         with self._lock:
@@ -252,6 +282,7 @@ class ManualIndexManager:
         try:
             previous = self.registry.get(manual_id)
             manual_dir = self.root / manual_id
+            previous_pdf = manual_dir / "original.pdf.previous"
             backup = self._backup_generated_files(manual_dir)
             built = False
             try:
@@ -277,12 +308,19 @@ class ManualIndexManager:
             finally:
                 if built and backup and backup.exists():
                     shutil.rmtree(backup, ignore_errors=True)
+                if built:
+                    previous_pdf.unlink(missing_ok=True)
         except Exception as exc:
             logger.exception("Manual indexing failed for %s", manual_id)
             self.registry.update_status(
                 manual_id, "failed", error=str(exc)[:2000], progress_step="Errore"
             )
         finally:
+            previous_pdf = self.root / manual_id / "original.pdf.previous"
+            if previous_pdf.exists():
+                original_pdf = self.root / manual_id / "original.pdf"
+                original_pdf.unlink(missing_ok=True)
+                previous_pdf.replace(original_pdf)
             with self._lock:
                 self._active.discard(manual_id)
             if self.on_complete:

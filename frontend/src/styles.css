@@ -2021,6 +2021,10 @@ select {
   color: #a2252d;
 }
 
+.upload-skipped .manual-upload-meta strong {
+  color: #66758a;
+}
+
 .manual-rows {
   display: grid;
   gap: 10px;

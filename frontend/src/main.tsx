@@ -128,7 +128,7 @@ type ManualUploadItem = {
   id: string;
   file: File;
   title: string;
-  status: "waiting" | "uploading" | "queued" | "failed";
+  status: "waiting" | "uploading" | "queued" | "failed" | "skipped";
   progress: number;
   error?: string;
 };
@@ -913,13 +913,14 @@ function App() {
     ]);
   }
 
-  function uploadManualFile(item: ManualUploadItem): Promise<ManualDocument> {
+  function uploadManualFile(item: ManualUploadItem, replaceManualId?: string): Promise<ManualDocument> {
     return new Promise((resolve, reject) => {
       const body = new FormData();
       body.append("file", item.file);
       body.append("title", item.title.trim() || item.file.name.replace(/\.pdf$/i, ""));
       body.append("all_departments", String(manualAllDepartments));
       body.append("department_ids", JSON.stringify(manualDepartmentIds));
+      if (replaceManualId) body.append("replace_manual_id", replaceManualId);
 
       const request = new XMLHttpRequest();
       request.open("POST", "/api/manuals");
@@ -966,15 +967,44 @@ function App() {
     setManualsMessage("");
     let uploaded = 0;
     let failed = 0;
+    let skipped = 0;
+    const knownByFilename = new Map(manuals.map((manual) => [manual.filename.toLowerCase(), manual]));
     for (const item of batch) {
+      const existing = knownByFilename.get(item.file.name.toLowerCase());
+      if (existing) {
+        if (["queued", "processing"].includes(existing.status)) {
+          failed += 1;
+          setManualUploads((current) =>
+            current.map((upload) =>
+              upload.id === item.id
+                ? { ...upload, status: "failed", error: "Un manuale con lo stesso nome e' gia' in elaborazione." }
+                : upload
+            )
+          );
+          continue;
+        }
+        const confirmed = window.confirm(
+          `Il file "${item.file.name}" e' gia' associato al manuale "${existing.title}". Vuoi sostituirlo e rifare il relativo indice?`
+        );
+        if (!confirmed) {
+          skipped += 1;
+          setManualUploads((current) =>
+            current.map((upload) =>
+              upload.id === item.id ? { ...upload, status: "skipped", progress: 0, error: undefined } : upload
+            )
+          );
+          continue;
+        }
+      }
       setManualUploads((current) =>
         current.map((upload) =>
           upload.id === item.id ? { ...upload, status: "uploading", progress: 0, error: undefined } : upload
         )
       );
       try {
-        const manual = await uploadManualFile(item);
+        const manual = await uploadManualFile(item, existing?.id);
         uploaded += 1;
+        knownByFilename.set(manual.filename.toLowerCase(), manual);
         setManuals((current) => [...current.filter((existing) => existing.id !== manual.id), manual]);
         setManualUploads((current) =>
           current.map((upload) =>
@@ -994,8 +1024,8 @@ function App() {
     setManualUploadRunning(false);
     setManualsMessage(
       failed
-        ? `${uploaded} PDF caricati e messi in coda; ${failed} non caricati.`
-        : `${uploaded} PDF caricati e messi in coda per l'indicizzazione.`
+        ? `${uploaded} PDF caricati e messi in coda; ${failed} non caricati${skipped ? `; ${skipped} non sostituiti` : ""}.`
+        : `${uploaded} PDF caricati e messi in coda${skipped ? `; ${skipped} non sostituiti` : " per l'indicizzazione"}.`
     );
   }
 
@@ -1748,7 +1778,9 @@ function App() {
                                 ? `Caricamento ${upload.progress}%`
                                 : upload.status === "queued"
                                   ? "Caricato e in coda"
-                                  : "Caricamento fallito"}
+                                  : upload.status === "skipped"
+                                    ? "Non sostituito"
+                                    : "Caricamento fallito"}
                           </strong>
                         </div>
                         {upload.status === "uploading" ? (
