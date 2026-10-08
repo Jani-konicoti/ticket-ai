@@ -1427,9 +1427,6 @@ function App() {
                         onOpen={openManualReference}
                       />
                     ) : null}
-                    <div className="model-line">
-                      Modello: {answer.model} - Embedding: {answer.embedding_model}
-                    </div>
                   </section>
                 ) : null}
                 {!answer.merged && answer.manual_answer ? (
@@ -1444,11 +1441,6 @@ function App() {
                       session={session}
                       onOpen={openManualReference}
                     />
-                    {answer.manuals_only ? (
-                      <div className="model-line">
-                        Modello: {answer.model} - Embedding: {answer.embedding_model}
-                      </div>
-                    ) : null}
                   </section>
                 ) : null}
               </div>
