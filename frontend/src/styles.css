@@ -1954,6 +1954,73 @@ select {
   background: #fbfdff;
 }
 
+.manual-upload-queue {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.manual-upload-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 40px;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid #dce4ee;
+  border-radius: 8px;
+  background: #fbfdff;
+}
+
+.manual-upload-item > svg {
+  margin-top: 9px;
+  color: #d61f2a;
+}
+
+.manual-upload-item-main {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.manual-upload-item-main > input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  color: #172033;
+  font-weight: 750;
+}
+
+.manual-upload-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  color: #66758a;
+  font-size: 0.8rem;
+}
+
+.manual-upload-meta span:first-child {
+  overflow-wrap: anywhere;
+}
+
+.manual-upload-meta strong {
+  margin-left: auto;
+  color: #46556a;
+}
+
+.upload-uploading .manual-upload-meta strong,
+.upload-queued .manual-upload-meta strong {
+  color: #17645f;
+}
+
+.upload-failed {
+  border-color: #efb8bc;
+  background: #fff8f8;
+}
+
+.upload-failed .manual-upload-meta strong {
+  color: #a2252d;
+}
+
 .manual-rows {
   display: grid;
   gap: 10px;

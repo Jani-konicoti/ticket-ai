@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import queue
 import shutil
 import sqlite3
 import threading
@@ -225,8 +226,9 @@ class ManualIndexManager:
         self.on_complete = on_complete
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._worker_lock = threading.Lock()
         self._active: set[str] = set()
+        self._queue: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._worker_loop, daemon=True).start()
 
     def start(self, manual_id: str) -> None:
         with self._lock:
@@ -236,39 +238,45 @@ class ManualIndexManager:
         self.registry.update_status(
             manual_id, "queued", error=None, progress_step="In coda", progress_current=0, progress_total=0
         )
-        threading.Thread(target=self._run, args=(manual_id,), daemon=True).start()
+        self._queue.put(manual_id)
+
+    def _worker_loop(self) -> None:
+        while True:
+            manual_id = self._queue.get()
+            try:
+                self._run(manual_id)
+            finally:
+                self._queue.task_done()
 
     def _run(self, manual_id: str) -> None:
         try:
-            # OCR and page rendering are deliberately serialized to protect small servers from memory spikes.
-            with self._worker_lock:
-                previous = self.registry.get(manual_id)
-                manual_dir = self.root / manual_id
-                backup = self._backup_generated_files(manual_dir)
-                built = False
-                try:
-                    self._build(manual_id)
-                    built = True
-                except Exception as exc:
-                    if backup and previous:
-                        self._restore_generated_files(manual_dir, backup)
-                        self.registry.update_status(
-                            manual_id,
-                            "ready",
-                            error=f"Ultima reindicizzazione non riuscita: {str(exc)[:1500]}",
-                            page_count=previous["page_count"],
-                            chunk_count=previous["chunk_count"],
-                            image_count=previous["image_count"],
-                            progress_step="Indice precedente ripristinato",
-                            progress_current=previous["progress_total"],
-                            progress_total=previous["progress_total"],
-                        )
-                        logger.exception("Manual reindex failed; previous index restored for %s", manual_id)
-                        return
-                    raise
-                finally:
-                    if built and backup and backup.exists():
-                        shutil.rmtree(backup, ignore_errors=True)
+            previous = self.registry.get(manual_id)
+            manual_dir = self.root / manual_id
+            backup = self._backup_generated_files(manual_dir)
+            built = False
+            try:
+                self._build(manual_id)
+                built = True
+            except Exception as exc:
+                if backup and previous:
+                    self._restore_generated_files(manual_dir, backup)
+                    self.registry.update_status(
+                        manual_id,
+                        "ready",
+                        error=f"Ultima reindicizzazione non riuscita: {str(exc)[:1500]}",
+                        page_count=previous["page_count"],
+                        chunk_count=previous["chunk_count"],
+                        image_count=previous["image_count"],
+                        progress_step="Indice precedente ripristinato",
+                        progress_current=previous["progress_total"],
+                        progress_total=previous["progress_total"],
+                    )
+                    logger.exception("Manual reindex failed; previous index restored for %s", manual_id)
+                    return
+                raise
+            finally:
+                if built and backup and backup.exists():
+                    shutil.rmtree(backup, ignore_errors=True)
         except Exception as exc:
             logger.exception("Manual indexing failed for %s", manual_id)
             self.registry.update_status(

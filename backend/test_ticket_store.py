@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -117,6 +118,27 @@ class TicketStoreShardTests(unittest.TestCase):
 
             self.assertIsNone(backup)
             self.assertFalse(partial_pages.exists())
+
+    def test_manual_index_manager_processes_uploads_in_queue_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            registry = ManualRegistry(root / "app.sqlite")
+            manager = ManualIndexManager(root / "manuals", registry, object(), "model")  # type: ignore[arg-type]
+            processed: list[str] = []
+            completed = threading.Event()
+
+            def fake_run(manual_id: str) -> None:
+                processed.append(manual_id)
+                if len(processed) == 3:
+                    completed.set()
+
+            manager._run = fake_run  # type: ignore[method-assign]
+            manager.start("manuale-1")
+            manager.start("manuale-2")
+            manager.start("manuale-3")
+
+            self.assertTrue(completed.wait(timeout=2))
+            self.assertEqual(processed, ["manuale-1", "manuale-2", "manuale-3"])
 
     def test_search_merges_base_and_append_shards(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

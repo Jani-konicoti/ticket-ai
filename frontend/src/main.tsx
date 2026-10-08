@@ -124,6 +124,15 @@ type ManualViewerState = {
   pageCount: number;
 };
 
+type ManualUploadItem = {
+  id: string;
+  file: File;
+  title: string;
+  status: "waiting" | "uploading" | "queued" | "failed";
+  progress: number;
+  error?: string;
+};
+
 type ProblemGroup = {
   key: string;
   title: string;
@@ -420,11 +429,14 @@ function App() {
   const [manualsLoading, setManualsLoading] = useState(false);
   const [manualsError, setManualsError] = useState("");
   const [manualsMessage, setManualsMessage] = useState("");
-  const [manualFile, setManualFile] = useState<File | null>(null);
-  const [manualTitle, setManualTitle] = useState("");
+  const [manualUploads, setManualUploads] = useState<ManualUploadItem[]>([]);
+  const [manualUploadRunning, setManualUploadRunning] = useState(false);
   const [manualAllDepartments, setManualAllDepartments] = useState(true);
   const [manualDepartmentIds, setManualDepartmentIds] = useState<number[]>([]);
   const [manualViewer, setManualViewer] = useState<ManualViewerState | null>(null);
+  const pendingManualUploads = manualUploads.filter(
+    (upload) => upload.status === "waiting" || upload.status === "failed"
+  ).length;
 
   useEffect(() => {
     if (!session) {
@@ -884,42 +896,107 @@ function App() {
     }
   }
 
+  function queueManualFiles(files: FileList | null) {
+    if (!files?.length) return;
+    const selected = Array.from(files)
+      .filter((file) => file.name.toLowerCase().endsWith(".pdf"))
+      .map((file) => ({
+        id: `${file.name}-${file.size}-${file.lastModified}`,
+        file,
+        title: file.name.replace(/\.pdf$/i, ""),
+        status: "waiting" as const,
+        progress: 0
+      }));
+    setManualUploads((current) => [
+      ...current,
+      ...selected.filter((item) => !current.some((existing) => existing.id === item.id))
+    ]);
+  }
+
+  function uploadManualFile(item: ManualUploadItem): Promise<ManualDocument> {
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      body.append("file", item.file);
+      body.append("title", item.title.trim() || item.file.name.replace(/\.pdf$/i, ""));
+      body.append("all_departments", String(manualAllDepartments));
+      body.append("department_ids", JSON.stringify(manualDepartmentIds));
+
+      const request = new XMLHttpRequest();
+      request.open("POST", "/api/manuals");
+      if (session?.token) request.setRequestHeader("Authorization", `Bearer ${session.token}`);
+      request.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        const progress = Math.min(99, Math.round((event.loaded / event.total) * 100));
+        setManualUploads((current) =>
+          current.map((upload) => (upload.id === item.id ? { ...upload, progress } : upload))
+        );
+      };
+      request.onerror = () => reject(new Error("Connessione interrotta durante il caricamento"));
+      request.onload = () => {
+        let payload: ManualDocument | { detail?: string } = {};
+        try {
+          payload = request.responseText ? JSON.parse(request.responseText) : {};
+        } catch {
+          payload = {};
+        }
+        if (request.status < 200 || request.status >= 300) {
+          const detail = "detail" in payload ? payload.detail : undefined;
+          reject(
+            new Error(
+              detail ||
+                (request.status === 413
+                  ? "Il PDF supera il limite consentito dal proxy web."
+                  : `Errore HTTP ${request.status || "di rete"}`)
+            )
+          );
+          return;
+        }
+        resolve(payload as ManualDocument);
+      };
+      request.send(body);
+    });
+  }
+
   async function uploadManual(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!manualFile) return;
-    const form = event.currentTarget;
-    setManualsLoading(true);
+    const batch = manualUploads.filter((item) => item.status === "waiting" || item.status === "failed");
+    if (!batch.length || manualUploadRunning) return;
+    setManualUploadRunning(true);
     setManualsError("");
     setManualsMessage("");
-    const body = new FormData();
-    body.append("file", manualFile);
-    body.append("title", manualTitle);
-    body.append("all_departments", String(manualAllDepartments));
-    body.append("department_ids", JSON.stringify(manualDepartmentIds));
-    try {
-      const response = await fetch("/api/manuals", { method: "POST", headers: authHeaders(session), body });
-      const contentType = response.headers.get("content-type") || "";
-      const payload = contentType.includes("application/json")
-        ? await response.json()
-        : {
-            detail:
-              response.status === 413
-                ? "Il PDF supera il limite consentito dal proxy web. Verifica il limite di upload Nginx."
-                : (await response.text()) || `Errore HTTP ${response.status}`
-          };
-      if (!response.ok) throw new Error(payload.detail || "Errore caricamento manuale");
-      setManuals((current) => [...current.filter((item) => item.id !== payload.id), payload]);
-      setManualFile(null);
-      setManualTitle("");
-      setManualAllDepartments(true);
-      setManualDepartmentIds([]);
-      form.reset();
-      setManualsMessage("PDF caricato. Estrazione, OCR e indicizzazione sono partiti.");
-    } catch (error) {
-      setManualsError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setManualsLoading(false);
+    let uploaded = 0;
+    let failed = 0;
+    for (const item of batch) {
+      setManualUploads((current) =>
+        current.map((upload) =>
+          upload.id === item.id ? { ...upload, status: "uploading", progress: 0, error: undefined } : upload
+        )
+      );
+      try {
+        const manual = await uploadManualFile(item);
+        uploaded += 1;
+        setManuals((current) => [...current.filter((existing) => existing.id !== manual.id), manual]);
+        setManualUploads((current) =>
+          current.map((upload) =>
+            upload.id === item.id ? { ...upload, status: "queued", progress: 100, error: undefined } : upload
+          )
+        );
+      } catch (error) {
+        failed += 1;
+        const message = error instanceof Error ? error.message : String(error);
+        setManualUploads((current) =>
+          current.map((upload) =>
+            upload.id === item.id ? { ...upload, status: "failed", error: message } : upload
+          )
+        );
+      }
     }
+    setManualUploadRunning(false);
+    setManualsMessage(
+      failed
+        ? `${uploaded} PDF caricati e messi in coda; ${failed} non caricati.`
+        : `${uploaded} PDF caricati e messi in coda per l'indicizzazione.`
+    );
   }
 
   async function reindexManual(manualId: string) {
@@ -1605,6 +1682,11 @@ function App() {
             </div>
             <div className="toolbar-actions">
               <span className="soft-chip">{manuals.filter((manual) => manual.status === "ready").length} pronti</span>
+              {manuals.some((manual) => ["queued", "processing"].includes(manual.status)) ? (
+                <span className="soft-chip">
+                  {manuals.filter((manual) => ["queued", "processing"].includes(manual.status)).length} in lavorazione
+                </span>
+              ) : null}
               <button className="icon-button" onClick={loadManuals} disabled={manualsLoading} aria-label="Ricarica manuali">
                 {manualsLoading ? <Loader2 className="spin" size={18} /> : <RefreshCcw size={18} />}
               </button>
@@ -1629,16 +1711,67 @@ function App() {
                   <input
                     type="file"
                     accept="application/pdf,.pdf"
-                    required
+                    multiple
+                    disabled={manualUploadRunning}
                     onChange={(event) => {
-                      const file = event.target.files?.[0] || null;
-                      setManualFile(file);
-                      if (file && !manualTitle) setManualTitle(file.name.replace(/\.pdf$/i, ""));
+                      queueManualFiles(event.target.files);
+                      event.currentTarget.value = "";
                     }}
                   />
                 </label>
-                <Field label="Titolo" value={manualTitle} onChange={setManualTitle} />
               </div>
+              {manualUploads.length ? (
+                <div className="manual-upload-queue">
+                  {manualUploads.map((upload) => (
+                    <div className={`manual-upload-item upload-${upload.status}`} key={upload.id}>
+                      <FileText size={19} />
+                      <div className="manual-upload-item-main">
+                        <input
+                          aria-label={`Titolo per ${upload.file.name}`}
+                          value={upload.title}
+                          disabled={manualUploadRunning || upload.status === "queued"}
+                          onChange={(event) =>
+                            setManualUploads((current) =>
+                              current.map((item) =>
+                                item.id === upload.id ? { ...item, title: event.target.value } : item
+                              )
+                            )
+                          }
+                        />
+                        <div className="manual-upload-meta">
+                          <span>{upload.file.name}</span>
+                          <span>{(upload.file.size / 1024 / 1024).toLocaleString("it-IT", { maximumFractionDigits: 1 })} MB</span>
+                          <strong>
+                            {upload.status === "waiting"
+                              ? "Da caricare"
+                              : upload.status === "uploading"
+                                ? `Caricamento ${upload.progress}%`
+                                : upload.status === "queued"
+                                  ? "Caricato e in coda"
+                                  : "Caricamento fallito"}
+                          </strong>
+                        </div>
+                        {upload.status === "uploading" ? (
+                          <div className="manual-progress-track" aria-label={`Upload ${upload.progress}%`}>
+                            <span style={{ width: `${upload.progress}%` }} />
+                          </div>
+                        ) : null}
+                        {upload.error ? <p className="manual-error">{upload.error}</p> : null}
+                      </div>
+                      <button
+                        className="icon-button"
+                        type="button"
+                        disabled={manualUploadRunning}
+                        onClick={() => setManualUploads((current) => current.filter((item) => item.id !== upload.id))}
+                        aria-label={`Rimuovi ${upload.file.name} dalla lista`}
+                        title="Rimuovi dalla lista"
+                      >
+                        <X size={17} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               <DepartmentPermissions
                 allDepartments={manualAllDepartments}
                 departments={filterOptions.departments}
@@ -1649,9 +1782,18 @@ function App() {
                 }}
               />
               <div className="controls-row">
-                <button className="primary-button" type="submit" disabled={manualsLoading || !manualFile}>
-                  {manualsLoading ? <Loader2 className="spin" size={18} /> : <FileUp size={18} />}
-                  Carica e indicizza
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={
+                    manualUploadRunning ||
+                    pendingManualUploads === 0
+                  }
+                >
+                  {manualUploadRunning ? <Loader2 className="spin" size={18} /> : <FileUp size={18} />}
+                  {manualUploadRunning
+                    ? "Caricamento in corso"
+                    : `Carica ${pendingManualUploads} ${pendingManualUploads === 1 ? "manuale" : "manuali"}`}
                 </button>
               </div>
             </form>
@@ -1679,7 +1821,13 @@ function App() {
                           <p>{manual.filename} - caricato da {manual.created_by}</p>
                         </div>
                         <span className={`manual-status status-${manual.status}`}>
-                          {manual.status === "ready" ? "Pronto" : manual.status === "failed" ? "Errore" : "Elaborazione"}
+                          {manual.status === "ready"
+                            ? "Pronto"
+                            : manual.status === "failed"
+                              ? "Errore"
+                              : manual.status === "queued"
+                                ? "In coda"
+                                : "Elaborazione"}
                         </span>
                       </div>
                       <div className="manual-stats">
